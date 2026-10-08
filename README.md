@@ -24,6 +24,8 @@ Without a UI (print mode, most subagents) there is nobody to ask, so those calls
 
 ```bash
 pi install npm:pi-automode-classifier
+# or straight from GitHub
+pi install git:github.com/deepu105/pi-automode-classifier
 ```
 
 Or from a checkout: `pi install ./pi-automode-classifier`.
