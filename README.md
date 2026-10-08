@@ -1,8 +1,10 @@
 # pi-automode-classifier
 
-Auto mode for [Pi](https://pi.dev). It decides per tool call whether the call runs, needs a confirm prompt, or is blocked. Rules settle most calls, a small local decision model handles the shell commands the rules don't know, and you get a prompt for the rest.
+An auto mode plugin for the [Pi](https://pi.dev) coding agent that uses a classifier model, [Jev](https://docs.typesafe.ai/api) (hosted) or [Kev](https://huggingface.co/jaredpalmer/kev-0.8b)/[Laya](https://huggingface.co/convaiinnovations/laya-typed-decisions) (running locally), to classify shell commands before they run.
 
-I built it because Pi runs every tool call without asking, and I wanted something like Claude Code's auto mode that works fully offline and doesn't take GPU time from the model doing the actual work. If you'd rather not run a model, it can also ask a hosted one such as Jev through Pi.
+It decides per tool call whether the call runs, needs a confirm prompt, or is blocked. Built-in rules decide most calls. The model checks the shell commands the rules don't know, and you get a prompt for the risky ones.
+
+I built it because Pi runs every tool call without asking for approval, and I wanted something like Claude Code's auto mode. With Kev or Laya on CPU it works fully offline and doesn't use the GPU. With Jev the commands are sent to the provider, so that one is opt-in.
 
 It is not a sandbox. It guards the agent's tool calls. It doesn't guard `!` commands you type, and extensions run with your user's permissions. Read [Pi's security docs](https://pi.dev/docs/latest/security) for real isolation.
 
