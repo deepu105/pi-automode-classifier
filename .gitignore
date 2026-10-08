@@ -1,0 +1,4 @@
+node_modules/
+*.tgz
+# machine config lives in ~/.pi/agent/extensions/pi-automode-classifier/
+config.json

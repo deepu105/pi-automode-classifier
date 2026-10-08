@@ -1,0 +1,16 @@
+# Example user unit. Copy to ~/.config/systemd/user/, fix the two paths, then run
+# `systemctl --user daemon-reload`. There is no [Install] section on purpose: set
+# "startCommand": ["systemctl", "--user", "start", "pi-automode-classifier.service"]
+# in the extension's config.json and the extension starts it on demand.
+[Unit]
+Description=Decision model for the Pi pi-automode-classifier extension
+
+[Service]
+# The model unloads after 5 idle minutes and reloads on the next request.
+ExecStart=/path/to/llama-server \
+    --model /path/to/Kev-0.8B-Q8_0.gguf \
+    --host 127.0.0.1 --port 11438 --no-webui \
+    --threads 8 --parallel 1 --ctx-size 1024 --sleep-idle-seconds 300
+Nice=10
+MemoryMax=2G
+Restart=on-failure
