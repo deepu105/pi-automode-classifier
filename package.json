@@ -1,8 +1,16 @@
 {
   "name": "pi-automode-classifier",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Auto mode for Pi: deterministic rules first, then a local decision model, then a confirm prompt",
-  "keywords": ["pi-package", "pi-extension", "auto-mode", "guardrails", "permissions", "decision-model", "llama.cpp"],
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "auto-mode",
+    "guardrails",
+    "permissions",
+    "decision-model",
+    "llama.cpp"
+  ],
   "license": "MIT",
   "author": "Deepu K Sasidharan",
   "repository": {
@@ -14,7 +22,13 @@
     "url": "https://github.com/deepu105/pi-automode-classifier/issues"
   },
   "type": "module",
-  "files": ["index.ts", "rules.ts", "systemd", "README.md", "LICENSE"],
+  "files": [
+    "index.ts",
+    "rules.ts",
+    "systemd",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "test": "node test.mjs",
     "bench": "node bench.mjs"
@@ -23,6 +37,8 @@
     "@earendil-works/pi-coding-agent": "*"
   },
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": [
+      "./index.ts"
+    ]
   }
 }

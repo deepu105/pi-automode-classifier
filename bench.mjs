@@ -6,7 +6,9 @@
 // Needs a Node that runs TypeScript directly (22.18 or newer) and the model server running.
 // With `classifier.provider` set (or a provider/model argument) the questions go through Pi's
 // model registry with Pi's credentials, so `pi` must be installed; the 50 commands are then
-// sent to that provider.
+// sent to that provider. With `classifier.command` set in the config the commands go to that
+// classifier process. The bench runs outside a git checkout, so the rules for project files
+// do not apply to it.
 // Usage: node bench.mjs [askAbove] [endpoint | provider/model]
 //   node bench.mjs 0.2 http://127.0.0.1:11439
 //   node bench.mjs 0.2 openrouter/typesafe/jev-1.13
@@ -16,7 +18,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 
 const here = import.meta.dirname;
-const { classify, loadConfig, DEFAULTS } = await import("./index.ts");
+const { classify, classifierName, classifierProcessPid, loadConfig, DEFAULTS } = await import("./index.ts");
 const { bashVerdict, makeScope } = await import("./rules.ts");
 
 // The bench measures a server that is already running, with your `classifier` section and
@@ -25,7 +27,7 @@ const mine = loadConfig().config;
 const target = process.argv[3] ?? "";
 const config = { ...DEFAULTS, endpoint: mine.endpoint, classifier: { ...mine.classifier, extraQuestions: {} } };
 if (/^https?:/.test(target)) config.endpoint = target;
-else if (target) Object.assign(config.classifier, { provider: target.slice(0, target.indexOf("/")), model: target.slice(target.indexOf("/") + 1) });
+else if (target) Object.assign(config.classifier, { command: [], provider: target.slice(0, target.indexOf("/")), model: target.slice(target.indexOf("/") + 1) });
 const askAbove = Number(process.argv[2] ?? mine.askAbove);
 
 // Pi's own model registry, for provider mode. Pi is a peer dependency, so when it is not
@@ -37,7 +39,8 @@ async function piRegistry() {
   });
   return new pi.ModelRegistry(await pi.ModelRuntime.create());
 }
-const registry = config.classifier.provider ? await piRegistry() : undefined;
+const viaProcess = config.classifier.command.length > 0;
+const registry = config.classifier.provider && !viaProcess ? await piRegistry() : undefined;
 // Does not need to exist; the rules only need a project root that is not $HOME.
 const cwd = path.join(os.homedir(), "project");
 const cases = JSON.parse(fs.readFileSync(path.join(here, "bench-cases.json"), "utf8"));
@@ -60,7 +63,7 @@ for (const [label, commands] of Object.entries(cases)) {
 
 const of = (label) => rows.filter((r) => r.label === label);
 const pct = (n, d) => `${n}/${d}`;
-console.log(`\naskAbove = ${askAbove}, model "${config.classifier.provider ? `${config.classifier.provider}/` : ""}${config.classifier.model}", ${config.classifier.levels.length ? `${config.classifier.levels.length}-level score` : "yes/no"} question`);
+console.log(`\naskAbove = ${askAbove}, model "${classifierName(config)}", ${viaProcess ? "its own score" : config.classifier.levels.length ? `${config.classifier.levels.length}-level score question` : "yes/no question"}`);
 for (const label of ["safe", "risky"]) {
   const all = of(label);
   const byRule = (a) => all.filter((r) => r.rule === a).length;
@@ -84,14 +87,16 @@ console.log(`on the commands the rules left to it: highest safe ${highestSafe.to
 const ms = rows.map((r) => r.ms).sort((a, b) => a - b);
 console.log(`model latency over ${ms.length} calls: p50 ${ms[ms.length >> 1]} ms, p95 ${ms[Math.floor(ms.length * 0.95)]} ms, max ${ms.at(-1)} ms`);
 console.log(`input tokens over ${rows.length} calls: ${rows.reduce((n, r) => n + r.tokens, 0)}`);
-if (config.classifier.provider) {
+if (registry) {
   console.log(`model: ${config.classifier.provider}/${config.classifier.model} through Pi's registry`);
 } else {
   try {
-    const pid = execFileSync("ss", ["-ltnpH"], { encoding: "utf8" }).split("\n").find((l) => l.includes(`:${new URL(config.endpoint).port} `))?.match(/pid=(\d+)/)?.[1];
+    const pid = viaProcess
+      ? classifierProcessPid()
+      : execFileSync("ss", ["-ltnpH"], { encoding: "utf8" }).split("\n").find((l) => l.includes(`:${new URL(config.endpoint).port} `))?.match(/pid=(\d+)/)?.[1];
     const status = fs.readFileSync(`/proc/${pid}/status`, "utf8");
     const mb = (key) => Math.round(Number(status.match(new RegExp(`${key}:\\s+(\\d+)`))[1]) / 1024);
-    console.log(`server memory: ${mb("VmRSS")} MB (${mb("RssAnon")} MB private, ${mb("RssFile")} MB model file mapped)`);
+    console.log(`${viaProcess ? "process" : "server"} memory: ${mb("VmRSS")} MB (${mb("RssAnon")} MB private, ${mb("RssFile")} MB model file mapped)`);
   } catch {
     console.log("server memory: could not read (server not owned by this user?)");
   }

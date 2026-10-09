@@ -9,27 +9,29 @@
 //    something invalid. The model never blocks on its own. Without a UI (print mode,
 //    subagents) these calls are blocked unless `withoutUi` is "allow".
 //
-// Covered tools: any tool with a string `command` input (bash and similar) and write/edit.
-// Not covered: read-only tools, tools from other extensions without a `command` input, and
+// Covered tools: any tool with a string `command` input (bash and similar), write/edit, and
+// read/grep of a credential file.
+// Not covered: other reads, tools from other extensions without a `command` input, and
 // `!` commands typed by the user. This is not a sandbox; see docs/security.md in Pi.
 //
 // With `classifier.provider` set the questions go to a hosted decision model (for example Jev)
-// through Pi's model registry instead. For the local route the server is not part of this
+// through Pi's model registry instead, and with `classifier.command` to a classifier that runs
+// as a local process (for example LANCET). For the local route the server is not part of this
 // package: README.md shows how to run llama-server with the Kev-0.8B GGUF, alone or under
 // LlamaStash. Another model on the same endpoint is not a drop-in
 // swap (Julia-1 answers the yes/no question near 0 for almost everything), so re-run
 // `node bench.mjs` after changing the questions, the model or `askAbove`.
 //
 // Optional CONFIG_FILE overrides DEFAULTS.
-// Tested against Pi 1.0.4 and llama.cpp 5ad1c5da0 with ggml-org/Kev-0.8B-GGUF Q8_0.
+// Tested against Pi 1.1.0, llama.cpp 5ad1c5da0 with ggml-org/Kev-0.8B-GGUF Q8_0, and LANCET Nano 0.4.3.
 
-import { spawn } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { bashVerdict, compileRules, fileVerdict, makeScope, type Action, type Verdict } from "./rules.ts";
+import { bashVerdict, commitWrites, compileRules, fileVerdict, isRootLike, makeScope, readVerdict, type Action, type SessionFiles, type Verdict } from "./rules.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOME = os.homedir();
@@ -78,6 +80,11 @@ export interface Config {
     // be trusted with questions and a threshold tuned for another one. Empty: any model.
     // With `provider`: the model id in Pi, for example "typesafe/jev-1.13".
     model: string;
+    // Command (argv) of a classifier that runs as a local process, for example LANCET's
+    // classify.py. When set it is used instead of `endpoint` and `provider`: each command goes
+    // to its stdin as a JSON line {"command", "shell"} and it answers with a JSON line that has
+    // a `score` from 0 to 1. The questions below are not used. A leading `~/` is expanded.
+    command: string[];
     // The main question and the descriptions of its yes and no answers.
     question: string;
     risky: string;
@@ -107,6 +114,7 @@ export const DEFAULTS: Config = {
   classifier: {
     provider: "",
     model: "kev",
+    command: [],
     question: "Is this command risky?",
     risky: "Deletes data, touches files outside the project, changes the system, uses credentials, or sends data to a remote server",
     safe: "Routine development work that only reads, builds, tests or edits files inside the project directory",
@@ -147,6 +155,7 @@ const CHECKS: Record<keyof Config, (v: unknown) => boolean> = {
     Object.keys(v).every((k) => k in DEFAULTS.classifier) &&
     isOptional(v.provider, "string") &&
     isOptional(v.model, "string") &&
+    (v.command === undefined || isStrings(v.command)) &&
     isOptional(v.question, "string") &&
     isOptional(v.risky, "string") &&
     isOptional(v.safe, "string") &&
@@ -253,7 +262,173 @@ async function startServer(config: Config, waitMs: number): Promise<boolean> {
   return false;
 }
 
+// ---- classifier process ----
+
+// `classifier.command`: the process stays up between calls and gets one command at a time.
+// Every Pi process has its own, so it starts on the first command the rules leave to it and
+// stops after CLASSIFIER_IDLE_MS without one.
+const CLASSIFIER_IDLE_MS = 5 * 60_000;
+interface ClassifierProcess {
+  // The command line it was started with.
+  key: string;
+  child: ChildProcess;
+  buffer: string;
+  // Receives the next output line, or undefined when the process is gone.
+  waiting?: (line: string | undefined) => void;
+}
+let classifierProcess: ClassifierProcess | undefined;
+let classifierTurn: Promise<unknown> = Promise.resolve();
+let classifierIdle: NodeJS.Timeout | undefined;
+
+export const classifierProcessPid = () => classifierProcess?.child.pid;
+
+export function stopClassifierProcess() {
+  clearTimeout(classifierIdle);
+  classifierProcess?.child.kill();
+  classifierProcess = undefined;
+}
+
+function startClassifierProcess(command: string[]): ClassifierProcess {
+  const [program, ...args] = command.map((word) => (word.startsWith("~/") ? HOME + word.slice(1) : word));
+  const child = spawn(program, args, { stdio: ["pipe", "pipe", "ignore"] });
+  const started: ClassifierProcess = { key: command.join("\0"), child, buffer: "" };
+  const deliver = (line: string | undefined) => {
+    const waiting = started.waiting;
+    started.waiting = undefined;
+    waiting?.(line);
+  };
+  child.stdout!.setEncoding("utf8").on("data", (chunk: string) => {
+    started.buffer += chunk;
+    const end = started.buffer.indexOf("\n");
+    if (end < 0 || !started.waiting) return;
+    const line = started.buffer.slice(0, end);
+    started.buffer = started.buffer.slice(end + 1);
+    deliver(line);
+  });
+  const gone = () => {
+    if (classifierProcess === started) classifierProcess = undefined;
+    deliver(undefined);
+  };
+  child.on("error", gone).on("exit", gone);
+  child.stdin!.on("error", () => {});
+  // The process must not keep Pi alive; a call that waits for an answer holds its own timer.
+  child.unref();
+  for (const stream of [child.stdin, child.stdout]) (stream as unknown as { unref?: () => void }).unref?.();
+  return started;
+}
+
+function askClassifierProcess(config: Config, state: Record<string, string>, signal?: AbortSignal): Promise<Classified> {
+  const run = async (): Promise<Classified> => {
+    const startedAt = performance.now();
+    const ms = () => Math.round(performance.now() - startedAt);
+    const program = classifierName(config);
+    if (classifierProcess?.key !== config.classifier.command.join("\0")) stopClassifierProcess();
+    const proc = (classifierProcess ??= startClassifierProcess(config.classifier.command));
+    proc.buffer = "";
+    let timer: NodeJS.Timeout | undefined;
+    let abort: (() => void) | undefined;
+    const line = await new Promise<string | undefined | "timeout" | "cancelled">((resolve) => {
+      timer = setTimeout(() => resolve("timeout"), config.timeoutMs);
+      abort = () => resolve("cancelled");
+      signal?.addEventListener("abort", abort, { once: true });
+      proc.waiting = resolve;
+      proc.child.stdin!.write(JSON.stringify({ command: state.command ?? "", shell: "bash", cwd: state.cwd }) + "\n");
+    });
+    clearTimeout(timer);
+    if (abort) signal?.removeEventListener("abort", abort);
+    clearTimeout(classifierIdle);
+    classifierIdle = setTimeout(stopClassifierProcess, CLASSIFIER_IDLE_MS);
+    classifierIdle.unref();
+    if (line === "timeout" || line === "cancelled") {
+      // Its late answer would be read as the answer to the next command.
+      stopClassifierProcess();
+      return { error: line === "timeout" ? `no answer in ${config.timeoutMs} ms` : "the call was cancelled", ms: ms() };
+    }
+    if (line === undefined) return { error: `the classifier process ${program} is not running`, ms: ms() };
+    let answer: { score?: unknown; reason?: unknown } | undefined;
+    try {
+      answer = JSON.parse(line);
+    } catch {
+      // Handled below as a missing score.
+    }
+    const score = answer?.score;
+    if (typeof score === "number" && score >= 0 && score <= 1) return { answers: { risky: score }, ms: ms() };
+    return { error: `${program} gave no score${typeof answer?.reason === "string" ? ` (${answer.reason})` : ""}`, ms: ms() };
+  };
+  const result = classifierTurn.then(run, run);
+  classifierTurn = result.catch(() => undefined);
+  return result;
+}
+
+// ---- git ----
+
+function git(dir: string, ...args: string[]): string | undefined {
+  try {
+    return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 2000 });
+  } catch {
+    return undefined;
+  }
+}
+const realpath = (p: string) => {
+  try {
+    return fs.realpathSync.native(p);
+  } catch {
+    return p;
+  }
+};
+
+// The checkouts of the git repository that holds `cwd`: the main one and its worktrees. Empty
+// outside a repository. $HOME and the directories above it are left out.
+export function checkouts(cwd: string): string[] {
+  const entries = (git(cwd, "worktree", "list", "--porcelain") ?? "").split("\n\n");
+  return entries
+    .filter((entry) => !/^bare$/m.test(entry))
+    .flatMap((entry) => /^worktree (.+)$/m.exec(entry)?.[1] ?? [])
+    .map(realpath)
+    .filter((dir) => !isRootLike(dir));
+}
+
+// True when `file` is tracked or ignored by the repository checked out in one of `roots`. A
+// repository cloned inside a checkout is a different one, so its files do not count.
+export function inCheckout(file: string, roots: string[]): boolean {
+  const dir = path.dirname(file);
+  const top = git(dir, "rev-parse", "--show-toplevel")?.trim();
+  if (!top || !roots.includes(realpath(top))) return false;
+  return git(dir, "ls-files", "--error-unmatch", "--", file) !== undefined || git(dir, "check-ignore", "-q", "--", file) !== undefined;
+}
+
+// ---- config file ----
+
+// Appends `value` to a list in the config file. Returns an error text when the file cannot be
+// read as a config or cannot be written.
+function saveToConfig(list: "allowedPaths" | "allow", value: string): string | undefined {
+  try {
+    const raw: unknown = fs.existsSync(CONFIG_FILE) ? JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8")) : {};
+    if (!isObject(raw)) throw new Error("it must be a JSON object");
+    if (list === "allow" && raw.rules === undefined) raw.rules = {};
+    const holder = list === "allow" ? raw.rules : raw;
+    if (!isObject(holder)) throw new Error('"rules" is not an object');
+    const current = holder[list] ?? [];
+    if (!isStrings(current)) throw new Error(`"${list}" is not a list of strings`);
+    if (!(current as string[]).includes(value)) holder[list] = [...(current as string[]), value];
+    fs.mkdirSync(path.dirname(CONFIG_FILE), { recursive: true });
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(raw, null, 2) + "\n");
+    return undefined;
+  } catch (e) {
+    return `could not save to ${CONFIG_FILE}: ${(e as Error).message}`;
+  }
+}
+
+// What answers the questions, for the log and the status command.
+export const classifierName = ({ classifier }: Config) =>
+  classifier.command.length
+    ? classifier.command.filter((word) => !word.startsWith("-")).slice(0, 2).map((word) => path.basename(word)).join(" ")
+    : classifier.provider
+      ? `${classifier.provider}/${classifier.model}`
+      : classifier.model;
+
 export async function classify(config: Config, state: Record<string, string>, signal?: AbortSignal, registry?: Registry): Promise<Classified> {
+  if (config.classifier.command.length) return askClassifierProcess(config, state, signal);
   const started = performance.now();
   const ms = () => Math.round(performance.now() - started);
   const questions = buildQuestions(config);
@@ -317,25 +492,36 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
   const loaded = loadConfig();
   const config = { ...loaded.config, ...overrides };
   const configError = loaded.error;
-  const scopeOptions = { allowedPaths: config.allowedPaths, rules: compileRules(config.rules) };
+  // The user's rules, plus the allow patterns picked in a prompt during this session.
+  const allowPatterns = [...config.rules.allow];
+  let rules = compileRules(config.rules);
+  const allowedPaths = [...config.allowedPaths];
   const guarded = [...GUARDED, ...config.guardedPaths];
   let enabled = config.enabled;
   const counts = { rule: 0, model: 0, asked: 0, blocked: 0 };
   // Exact commands and paths the user allowed for the rest of the session.
   const sessionAllowed = new Set<string>();
+  // Files the session wrote or downloaded, as far as the rules saw it.
+  const files: SessionFiles = new Map();
+  // Git checkouts per working directory, as they were when the session first used it. A
+  // worktree added later asks once, so `git worktree add` cannot open a folder by itself.
+  const repositories = new Map<string, string[]>();
   // Tool calls of one message run in parallel; show one prompt at a time.
   let prompts: Promise<unknown> = Promise.resolve();
 
   pi.on("session_start", async (_event, ctx) => {
     if (configError && ctx.hasUI) ctx.ui.notify(`pi-automode-classifier: ${configError}`, "warning");
     // Warm the server in the background so the first classified call does not wait for it.
-    if (enabled && !config.classifier.provider) void health(config, 300).then((up) => up || startServer(config, 10_000));
+    if (enabled && !config.classifier.command.length && !config.classifier.provider) void health(config, 300).then((up) => up || startServer(config, 10_000));
   });
+  pi.on("session_shutdown", async () => stopClassifierProcess());
 
   pi.on("tool_call", async (event, ctx) => {
     if (!enabled) return undefined;
     const input = event.input as Record<string, unknown>;
-    const scope = makeScope(ctx.cwd, guarded, scopeOptions);
+    if (!repositories.has(ctx.cwd)) repositories.set(ctx.cwd, checkouts(ctx.cwd));
+    const roots = repositories.get(ctx.cwd)!;
+    const scope = makeScope(ctx.cwd, guarded, { rules, allowedPaths: [...allowedPaths, ...roots], files, project: (p) => inCheckout(p, roots) });
     let subject: string;
     let verdict: Verdict;
     if (typeof input.command === "string") {
@@ -344,21 +530,30 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
     } else if ((event.toolName === "write" || event.toolName === "edit") && typeof input.path === "string") {
       subject = input.path;
       verdict = fileVerdict(event.toolName, subject, scope);
+    } else if ((event.toolName === "read" || event.toolName === "grep") && typeof input.path === "string") {
+      // Reads are not checked, except for credential files.
+      const secret = readVerdict(event.toolName, input.path, scope);
+      if (!secret) return undefined;
+      subject = input.path;
+      verdict = secret;
     } else return undefined;
 
     const entry: Record<string, unknown> = { tool: event.toolName, cwd: ctx.cwd, subject: clip(subject, 4000), rule: verdict.action, reason: verdict.reason };
-    const finish = (outcome: string, by: string) => log(config, { ...entry, outcome, by });
+    const finish = (outcome: string, by: string) => {
+      if (outcome === "allow") commitWrites(scope);
+      log(config, { ...entry, outcome, by });
+    };
 
     if (verdict.action === "classify") {
       const result = await classify(config, { tool: event.toolName, cwd: ctx.cwd, command: subject }, ctx.signal, ctx.modelRegistry as unknown as Registry);
-      Object.assign(entry, result);
+      Object.assign(entry, result, { model: classifierName(config) });
       const reason = "answers" in result ? flagged(config, result.answers) : `model gave no answer: ${result.error}`;
       if (!reason) {
         counts.model++;
         finish("allow", "model");
         return undefined;
       }
-      verdict = { action: "ask", reason };
+      verdict = { action: "ask", reason, pattern: verdict.pattern };
     }
 
     if (verdict.action === "allow") {
@@ -390,11 +585,29 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
 
     counts.asked++;
     const title = `Auto mode: allow ${event.toolName}?\n${verdict.reason}\n\n${clip(subject, 1200)}`;
-    const answer = prompts.then(() => ctx.ui.select(title, ["Allow once", "Allow for this session", "Block"], { signal: ctx.signal }));
+    // A change outside the working directory can be allowed for its whole folder, and a command
+    // the rules do not know for its pattern, so the next one does not ask again. Both can also
+    // be saved to the config file.
+    const dir = verdict.dir?.replace(HOME, "~");
+    const covers = dir ? `changes in ${dir}` : verdict.pattern ? `"${verdict.pattern}"` : undefined;
+    const forSession = covers ? `Allow ${covers} for this session` : "Allow for this session";
+    const always = covers ? `Always allow ${covers}` : undefined;
+    const answer = prompts.then(() => ctx.ui.select(title, ["Allow once", forSession, ...(always ? [always] : []), "Block"], { signal: ctx.signal }));
     prompts = answer.catch(() => undefined);
     const choice = await answer;
-    if (choice === "Allow for this session") sessionAllowed.add(key);
-    if (choice === "Allow once" || choice === "Allow for this session") {
+    const wider = choice === forSession || (always !== undefined && choice === always);
+    if (wider) {
+      if (verdict.dir) allowedPaths.push(verdict.dir);
+      else if (verdict.pattern) {
+        allowPatterns.push(verdict.pattern);
+        rules = compileRules({ ...config.rules, allow: allowPatterns });
+      } else sessionAllowed.add(key);
+    }
+    if (always !== undefined && choice === always) {
+      const error = verdict.dir ? saveToConfig("allowedPaths", dir!) : saveToConfig("allow", verdict.pattern!);
+      if (error) ctx.ui.notify(`pi-automode-classifier: ${error}`, "warning");
+    }
+    if (choice === "Allow once" || wider) {
       finish("allow", "user");
       return undefined;
     }
@@ -410,15 +623,18 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
       const arg = args.trim();
       if (arg === "on" || arg === "off") enabled = arg === "on";
       else if (arg && arg !== "status") return ctx.ui.notify("Usage: /automode-classifier status | on | off", "warning");
-      const { provider, model } = config.classifier;
-      const where = provider ? `model ${provider}/${model} through Pi (commands are sent to ${provider})` : `model server ${config.endpoint}: ${(await health(config, 500)) ? "up" : "down"}`;
-      const rules = config.rules;
+      const { provider, model, command } = config.classifier;
+      const where = command.length
+        ? `classifier process ${command.join(" ")}: ${classifierProcess ? "running" : "not running"}`
+        : provider
+          ? `model ${provider}/${model} through Pi (commands are sent to ${provider})`
+          : `model server ${config.endpoint}: ${(await health(config, 500)) ? "up" : "down"}`;
       const extra = Object.keys(config.classifier.extraQuestions);
       ctx.ui.notify(
         [
           `pi-automode-classifier: ${enabled ? "on" : "OFF for this session"}`,
           `${where} (asks at risk >= ${config.askAbove})${extra.length ? `, extra questions: ${extra.join(", ")}` : ""}`,
-          `your rules: ${rules.deny.length} deny, ${rules.ask.length} ask, ${rules.classify.length} classify, ${rules.allow.length} allow; ${config.allowedPaths.length} allowed paths`,
+          `your rules: ${rules.deny.length} deny, ${rules.ask.length} ask, ${rules.classify.length} classify, ${rules.allow.length} allow; ${allowedPaths.length} allowed paths`,
           `this session: ${counts.rule} allowed by rule, ${counts.model} by model, ${counts.asked} asked, ${counts.blocked} blocked`,
           `config: ${CONFIG_FILE}${fs.existsSync(CONFIG_FILE) ? "" : " (not present, defaults in use)"}`,
           config.log ? `log: ${LOG_FILE}` : "log: off",
