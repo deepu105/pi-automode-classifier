@@ -35,12 +35,19 @@ export interface Verdict {
   // Set when one command the rules do not know sent the call to the model: an allow pattern
   // for it that the confirm prompt can offer.
   pattern?: string;
+  // Set on a classify verdict that runs files the session wrote: their paths, so the decider can
+  // be given what runs.
+  files?: string[];
 }
 
 const HOME = os.homedir();
 const RANK: Record<Action, number> = { allow: 0, classify: 1, ask: 2, deny: 3 };
-const worst = (...verdicts: Verdict[]): Verdict =>
-  verdicts.reduce((a, b) => (RANK[b.action] > RANK[a.action] || (RANK[b.action] === RANK[a.action] && b.locked && !a.locked) ? b : a));
+function worst(...verdicts: Verdict[]): Verdict {
+  const w = verdicts.reduce((a, b) => (RANK[b.action] > RANK[a.action] || (RANK[b.action] === RANK[a.action] && b.locked && !a.locked) ? b : a));
+  // Files that run go to the decider whichever part of the command runs them.
+  const files = verdicts.flatMap((v) => v.files ?? []);
+  return files.length && w.action === "classify" ? { ...w, files: [...new Set(files)] } : w;
+}
 const ALLOW: Verdict = { action: "allow", reason: "" };
 const classify = (reason: string): Verdict => ({ action: "classify", reason });
 const ask = (reason: string): Verdict => ({ action: "ask", reason });
@@ -97,6 +104,10 @@ export interface Scope {
   pending: SessionFiles;
   // True for a file of the project checkout: tracked or ignored by the session's git repository.
   project?: (p: string) => boolean;
+  // With the chat decider, running a file the session wrote or edited goes to it instead of being
+  // allowed. Otherwise writing code to a file and running it would skip the decider. A curl that
+  // sends data only to this machine goes to it instead of asking.
+  chatDecider?: boolean;
 }
 
 const expandHome = (p: string) => (p === "~" || p.startsWith("~/") ? HOME + p.slice(1) : p);
@@ -107,6 +118,7 @@ export interface ScopeOptions {
   rules?: UserRules;
   files?: SessionFiles;
   project?: (p: string) => boolean;
+  chatDecider?: boolean;
 }
 
 export function makeScope(cwd: string, guarded: string[], options: ScopeOptions = {}): Scope {
@@ -120,6 +132,7 @@ export function makeScope(cwd: string, guarded: string[], options: ScopeOptions 
     files: options.files ?? new Map(),
     pending: new Map(),
     project: options.project,
+    chatDecider: options.chatDecider,
   };
 }
 
@@ -231,7 +244,11 @@ function runFile(word: string, args: string[], scope: Scope): Verdict | undefine
   const origin = originOf(p, scope);
   if (origin === "fetched") return ask(`runs a file downloaded in this session: ${word}`);
   if (isGuarded(p, scope) || !isLocal(p, scope) || OUTWARD_WORDS.test([path.basename(word), ...args].join(" "))) return undefined;
-  if (origin === "authored") return ALLOW;
+  if (origin === "authored") {
+    if (!scope.chatDecider) return ALLOW;
+    // A file written by this same command is in the command itself.
+    return { ...classify(`runs ${word}, which this session wrote`), files: scope.pending.has(p) ? [] : [p] };
+  }
   return origin === undefined && scope.project?.(p) ? ALLOW : undefined;
 }
 
@@ -729,6 +746,15 @@ function subcommand(tool: string, args: string[]): Verdict {
 }
 
 function network(cmd: string, args: string[], scope: Scope): Verdict {
+  const sent = sends(cmd, args);
+  if (!sent) return saves(cmd, args, scope);
+  // A server on this machine can still pass the data on, so the request is not allowed outright:
+  // the chat decider judges it from the whole command.
+  if (scope.chatDecider && cmd === "curl" && loopbackOnly(args)) return worst(classify("curl sends data to a server on this machine"), saves(cmd, args, scope));
+  return sent;
+}
+
+function sends(cmd: string, args: string[]): Verdict | undefined {
   if (cmd === "curl") {
     if (args.some((a) => /^(-d|--data|--data-\w+|--json|-F|--form|--form-string|-T|--upload-file)(=|$)/.test(a) || /^-[a-zA-Z]*[dFT]/.test(a))) {
       return ask("curl sends data to a remote host");
@@ -741,6 +767,48 @@ function network(cmd: string, args: string[], scope: Scope): Verdict {
   }
   // A URL or header built from a variable or a substitution can carry local data out.
   if (args.some((a) => /[$`]/.test(a))) return ask(`${cmd} request built from local data`);
+  return undefined;
+}
+
+// The port may be a variable: with the host and the `:` fixed, it cannot point the request elsewhere.
+const LOOPBACK_URL = /^(https?:\/\/)?(localhost|127(\.\d{1,3}){3}|\[::1\])(:(\d+|\$\w+|\$\{\w+\}))?([/?#]\S*)?$/i;
+const CURL_SHORT_VALUE = new Set("dFTHowmXAebcuYyCErzDUQtP");
+const CURL_LONG_VALUE = new Set(
+  "--data --data-raw --data-binary --data-urlencode --data-ascii --json --form --form-string --upload-file --header --output --write-out --max-time --connect-timeout --request --user-agent --referer --cookie --cookie-jar --user --retry --retry-delay --retry-max-time --dump-header --range --continue-at --cert --key --cacert --capath --limit-rate --oauth2-bearer --url-query --unix-socket".split(" "),
+);
+
+// True when every URL of a curl command is on this machine. A proxy, a resolve override or a
+// config file can send a loopback URL elsewhere, so they never count as local. A word after an
+// option this does not know is taken as a URL, so an unknown option makes it false, not true.
+function loopbackOnly(args: string[]): boolean {
+  let urls = 0;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    let url: string | undefined;
+    if (/^--(proxy|preproxy|socks\w*|resolve|connect-to|config)(=|$)/.test(a)) return false;
+    if (/^--(url|expand-url)=/.test(a)) url = a.slice(a.indexOf("=") + 1);
+    else if (a === "--url" || a === "--expand-url") url = args[++i];
+    else if (a.startsWith("--")) {
+      if (CURL_LONG_VALUE.has(a)) i++;
+      continue;
+    } else if (/^-./.test(a)) {
+      for (let j = 1; j < a.length; j++) {
+        if (a[j] === "x" || a[j] === "K") return false;
+        if (CURL_SHORT_VALUE.has(a[j])) {
+          if (j === a.length - 1) i++;
+          break;
+        }
+      }
+      continue;
+    } else url = a;
+    if (!LOOPBACK_URL.test(url ?? "")) return false;
+    urls++;
+  }
+  return urls > 0;
+}
+
+// The files a curl or wget command saves.
+function saves(cmd: string, args: string[], scope: Scope): Verdict {
   const outFlags = cmd === "curl" ? ["-o", "--output"] : ["-O", "--output-document"];
   const o = args.findIndex((a) => outFlags.includes(a));
   if (o >= 0 && args[o + 1] !== "-") {
@@ -984,7 +1052,9 @@ export function fileVerdict(tool: string, target: string, scope: Scope): Verdict
   const p = resolveWord(target.startsWith("@") ? target.slice(1) : target, scope);
   if (isGuarded(p, scope)) return guardAsk(`${tool} changes the auto-mode guard's own files`);
   // The write tool replaces the whole file with the agent's text; an edit keeps the file's origin.
-  if (tool === "write") note(p, "authored", scope);
+  // For the chat decider an edit makes a file of no known origin one the session wrote, so a
+  // project script the agent changed goes to it when run.
+  if (tool === "write" || (scope.chatDecider && p && originOf(p, scope) === undefined)) note(p, "authored", scope);
   return isLocal(p, scope) ? ALLOW : outside(`${tool} outside the working directory: ${target}`, p);
 }
 

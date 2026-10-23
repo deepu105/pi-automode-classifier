@@ -25,13 +25,16 @@
   "files": [
     "index.ts",
     "rules.ts",
+    "automode.ts",
+    "automode-rules.json",
     "systemd",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
     "test": "node test.mjs",
-    "bench": "node bench.mjs"
+    "bench": "node bench.mjs",
+    "bench:llm": "node bench-llm.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
