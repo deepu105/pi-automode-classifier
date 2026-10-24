@@ -3,7 +3,7 @@
   "source": "Claude Code auto-mode built-in defaults",
   "version": "2.1.304 (Claude Code)",
   "command": "claude auto-mode defaults",
-  "note": "Edit through the classifier.llm {environment,hardDeny,softDeny,allow} config keys; each list replaces these defaults for its section unless it starts with the string \"$defaults\"."
+  "note": "Edit through the llm.prompt {environment,hardDeny,softDeny,allow} config keys; each list replaces these defaults for its section unless it holds the string \"$defaults\", which keeps them at that position."
  },
  "environment": [
   "**Organization**: None configured",

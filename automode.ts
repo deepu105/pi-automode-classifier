@@ -5,11 +5,12 @@
 // browser tools, no cross-session messages, no Claude-in-Chrome harness lines. The parts that
 // carry the decision logic are kept as they are: the threat model, the "default is allowed"
 // rule, the nine user-intent principles, the evaluation rules, the seven-step classification
-// process and the `<block>` output format. Rule lists come from automode-rules.json and can be
-// replaced per section from the config.
+// process and the `<block>` output format. Rule lists come from automode-rules.json as Claude Code
+// prints them, so a few name tools and `.claude` paths Pi does not have, and they can be replaced
+// per section from the config.
 //
 // Like Claude Code, the system prompt is a fixed string: the transcript and the action go in
-// the last user message, so the ~30k-token prompt is a prefix cache hit on every call.
+// the last user message, so the ~25k-token prompt is a prefix cache hit on every call.
 
 // Rule lists come from automode-rules.json next to this file, so a plain read is used rather
 // than a JSON import: Pi loads extensions through its own loader, which does not need to
@@ -24,9 +25,6 @@ const rulesFile = JSON.parse(fs.readFileSync(new URL("./automode-rules.json", im
 };
 
 export interface LlmConfig {
-  // Off by default: with this false the classifier model, the classifier process or the confirm
-  // prompt decides, as before.
-  enabled: boolean;
   // Pi provider id and model id. Both empty means the model of the current session; a model
   // without a provider is looked up in the session's provider. A model Pi does not have is an
   // error, never a switch to the session model.
@@ -39,20 +37,21 @@ export interface LlmConfig {
   contextWindow: number;
   // Reply budget of the reasoning stage, in tokens.
   maxTokens: number;
-  // Send a thinking level at all. With false both stages run without thinking.
-  reasoning: boolean;
-  // Thinking level to send; "" or "off" sends none. Stage 1 never sends one.
+  // Thinking level of the reasoning stage. With "off" neither stage thinks and no level is sent.
+  // Stage 1 never sends one.
   thinkingLevel: string;
   // Send one throwaway call at session start so the rule prompt is cached before the first real
-  // question. It costs one call per session, so turn it off for a model you pay per token.
+  // question. Off by default: it costs one call per session, which is wasted on a model you pay
+  // per token. On a local model it saves the cold prefill of the first decision.
   warmCache: boolean;
   // Claude Code's two-stage split: a fast filter first, reasoning only on what it flags.
   twoStage: boolean;
   stage1MaxTokens: number;
+  // Per stage, so a call that needs both stages can take twice this.
   timeoutMs: number;
-  // No answer (down, timeout, unparseable): block the call, like Claude Code's closed iron gate.
-  // With false such a call falls back to the confirm prompt.
-  failClosed: boolean;
+  // No answer (down, timeout, unparseable): "block" the call, like Claude Code's closed iron
+  // gate, or "ask" with the confirm prompt.
+  onNoAnswer: "block" | "ask";
   // "block": deny and let the agent look for a safer path, as Claude Code does. "ask": prompt.
   onBlock: "block" | "ask";
   // Deny-and-continue stops after this many denials in a row and asks the human instead.
@@ -69,27 +68,22 @@ export interface LlmConfig {
     includeAssistantText: boolean;
     includeToolResults: boolean;
   };
-  // Rule lists. "$defaults" keeps the built-in list at that position.
-  environment?: string[];
-  hardDeny?: string[];
-  softDeny?: string[];
-  allow?: string[];
+  // Rule lists of the prompt. "$defaults" keeps the built-in list at that position.
+  prompt: LlmRules;
 }
 
 export const DEFAULT_LLM: LlmConfig = {
-  enabled: false,
   provider: "",
   model: "",
   name: "",
   contextWindow: 0,
   maxTokens: 2048,
-  reasoning: true,
   thinkingLevel: "low",
-  warmCache: true,
+  warmCache: false,
   twoStage: true,
   stage1MaxTokens: 128,
   timeoutMs: 60_000,
-  failClosed: true,
+  onNoAnswer: "block",
   onBlock: "block",
   maxConsecutiveDenials: 3,
   maxTotalDenials: 20,
@@ -101,6 +95,7 @@ export const DEFAULT_LLM: LlmConfig = {
     includeAssistantText: false,
     includeToolResults: false,
   },
+  prompt: { environment: ["$defaults"], hardDeny: ["$defaults"], softDeny: ["$defaults"], allow: ["$defaults"] },
 };
 
 export interface LlmRules {

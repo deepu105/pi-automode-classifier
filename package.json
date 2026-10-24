@@ -1,6 +1,6 @@
 {
   "name": "pi-automode-classifier",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Auto mode for Pi: deterministic rules first, then a local decision model, then a confirm prompt",
   "keywords": [
     "pi-package",
@@ -27,6 +27,7 @@
     "rules.ts",
     "automode.ts",
     "automode-rules.json",
+    "config.example.jsonc",
     "systemd",
     "README.md",
     "LICENSE"

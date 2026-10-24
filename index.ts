@@ -2,25 +2,27 @@
 //
 // 1. Deterministic rules (rules.ts) settle most calls: allow, ask or deny. Your own rules from
 //    the config replace the built-in verdict.
-// 2. Shell commands the rules do not know go to a local decision model (Kev-0.8B) through a
-//    llama-server `/v1/systemone` endpoint. A risk below `askAbove` runs without a prompt. With
-//    `classifier.llm` a general chat model decides instead, over the same context Claude Code's
-//    auto mode uses: the user's own messages and the session's tool calls. See automode.ts.
-// 3. Everything else gets a confirm prompt: rule "ask" verdicts, a risk at or above
-//    `askAbove`, input too long for the model, or a server that is down, slow or returns
-//    something invalid. The model never blocks on its own. Without a UI (print mode,
-//    subagents) these calls are blocked unless `withoutUi` is "allow".
+// 2. Calls the rules leave open go to the decider. By default that is a chat model, the
+//    session's own or `llm.provider`/`llm.model`, which judges them over the same context Claude
+//    Code's auto mode uses: the user's own messages and the session's tool calls (automode.ts).
+//    It also gets most asks (forDecider in rules.ts), and blocks what it judges unsafe.
+//    `decider: "classifier"` uses a decision model instead (Kev-0.8B on a llama-server
+//    `/v1/systemone` endpoint, or one through Pi such as Jev), and `decider: "command"` a
+//    classifier that runs as a local process (LANCET). Their risk below `askAbove` runs without
+//    a prompt; they never block on their own.
+// 3. Everything else gets a confirm prompt: rule "ask" verdicts, a classifier risk at or above
+//    `askAbove`, or a classifier that is down, slow or returns something invalid. Without a UI
+//    (print mode, subagents) these calls are blocked unless `withoutUi.onAsk` is "allow".
 //
 // Covered tools: any tool with a string `command` input (bash and similar), write/edit, and
 // read/grep of a credential file.
 // Not covered: other reads, tools from other extensions without a `command` input, and
 // `!` commands typed by the user. This is not a sandbox; see docs/security.md in Pi.
 //
-// With `classifier.provider` set the questions go to a hosted decision model (for example Jev)
-// through Pi's model registry instead, and with `classifier.command` to a classifier that runs
-// as a local process (for example LANCET). For the local route the server is not part of this
-// package: README.md shows how to run llama-server with the Kev-0.8B GGUF, alone or under
-// LlamaStash. Another model on the same endpoint is not a drop-in
+// With `classifier.provider` set the classifier questions go to a hosted decision model (for
+// example Jev) through Pi's model registry instead of `classifier.endpoint`. The local server is
+// not part of this package: README.md shows how to run llama-server with the Kev-0.8B GGUF, alone
+// or under LlamaStash. Another model on the same endpoint is not a drop-in
 // swap (Julia-1 answers the yes/no question near 0 for almost everything), so re-run
 // `node bench.mjs` after changing the questions, the model or `askAbove`.
 //
@@ -33,14 +35,15 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { bashVerdict, commitWrites, compileRules, fileVerdict, isRootLike, makeScope, readVerdict, type Action, type SessionFiles, type Verdict } from "./rules.ts";
-import { buildSystemPrompt, buildTranscript, denyMessage, mergeRules, parseVerdict, STAGE1_INSTRUCTION, stage2Instruction, DEFAULT_RULES, DEFAULT_LLM, type LlmConfig, type LlmRules, type Outcome, type TranscriptItem } from "./automode.ts";
+import { bashVerdict, commitWrites, compileRules, fileVerdict, isRootLike, makeScope, readVerdict, within, type Action, type SessionFiles, type Verdict } from "./rules.ts";
+import { buildSystemPrompt, buildTranscript, denyMessage, mergeRules, parseVerdict, STAGE1_INSTRUCTION, stage2Instruction, DEFAULT_RULES, DEFAULT_LLM, type LlmConfig, type Outcome, type TranscriptItem } from "./automode.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOME = os.homedir();
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? path.join(HOME, ".pi/agent");
 // User config lives outside the package so a package update does not overwrite it.
 export const CONFIG_FILE = path.join(AGENT_DIR, "extensions/pi-automode-classifier/config.json");
+const EXAMPLE_FILE = path.join(HERE, "config.example.jsonc");
 export const LOG_FILE = path.join(process.env.XDG_STATE_HOME ?? path.join(HOME, ".local/state"), "pi-automode-classifier/decisions.jsonl");
 
 // An extra yes/no question for the model. `yes` and `no` describe the two answers.
@@ -48,22 +51,44 @@ export interface Question {
   question: string;
   yes?: string;
   no?: string;
-  // Defaults to the top-level askAbove.
+  // Defaults to classifier.askAbove.
   askAbove?: number;
+}
+
+export type Decider = "llm" | "classifier" | "command";
+
+export interface ClassifierConfig {
+  // Local decision model server, used when `provider` is empty.
+  endpoint: string;
+  // Command (argv) run when the endpoint refuses connections, for example
+  // ["systemctl", "--user", "start", "pi-automode-classifier.service"]. Empty: start nothing.
+  startCommand: string[];
+  // Pi provider id, for example "openrouter". When set, questions go through Pi's model
+  // registry with Pi's credentials instead of `endpoint`, and every classified command and its
+  // working directory are sent to that provider.
+  provider: string;
+  // Local server: part of the model name the server must report, so a swapped model cannot
+  // be trusted with questions and a threshold tuned for another one. Empty: any model.
+  // With `provider`: the model id in Pi, for example "typesafe/jev-1.13".
+  model: string;
+  timeoutMs: number;
+  // A risk at or above this gets a confirm prompt. 0 asks for every classified call.
+  askAbove: number;
+  // The main question and the descriptions of its yes and no answers.
+  question: string;
+  risky: string;
+  safe: string;
+  // When set (2 to 10 entries, least risky first), the main question is asked as a score
+  // over these levels instead of yes/no, and the risk is the expected level scaled to 0..1.
+  levels: string[];
+  // More questions, by id. A string is a bare question. Each one adds about one model call
+  // of latency, and a yes at or above its threshold gets a prompt.
+  extraQuestions: Record<string, string | Question>;
 }
 
 export interface Config {
   // Starting state of a session. `/automode-classifier on|off` changes it for that session.
   enabled: boolean;
-  endpoint: string;
-  timeoutMs: number;
-  // A model answer at or above this value gets a confirm prompt. 0 asks for every classified call.
-  askAbove: number;
-  // Command (argv) run when the endpoint refuses connections, for example
-  // ["systemctl", "--user", "start", "pi-automode-classifier.service"]. Empty: start nothing.
-  startCommand: string[];
-  // What happens to a call that needs a prompt when there is no UI to show it.
-  withoutUi: "block" | "allow";
   // Append every decision to LOG_FILE.
   log: boolean;
   // Patterns over one simple command; see compilePattern in rules.ts. They replace the built-in
@@ -74,59 +99,50 @@ export interface Config {
   // More files or directories that count as the guard's own (changes to them always ask),
   // for example the server's unit file. `~` is expanded.
   guardedPaths: string[];
-  classifier: {
-    // Pi provider id, for example "openrouter". When set, questions go through Pi's model
-    // registry with Pi's credentials instead of `endpoint`, and every classified command and its
-    // working directory are sent to that provider. Empty: the local server at `endpoint`.
-    provider: string;
-    // Local server: part of the model name the server must report, so a swapped model cannot
-    // be trusted with questions and a threshold tuned for another one. Empty: any model.
-    // With `provider`: the model id in Pi, for example "typesafe/jev-1.13".
-    model: string;
-    // Command (argv) of a classifier that runs as a local process, for example LANCET's
-    // classify.py. When set it is used instead of `endpoint` and `provider`: each command goes
-    // to its stdin as a JSON line {"command", "shell"} and it answers with a JSON line that has
-    // a `score` from 0 to 1. The questions below are not used. A leading `~/` is expanded.
-    command: string[];
-    // The main question and the descriptions of its yes and no answers.
-    question: string;
-    risky: string;
-    safe: string;
-    // When set (2 to 10 entries, least risky first), the main question is asked as a score
-    // over these levels instead of yes/no, and the risk is the expected level scaled to 0..1.
-    levels: string[];
-    // More questions, by id. A string is a bare question. Each one adds about one model call
-    // of latency, and a yes at or above its threshold gets a prompt.
-    extraQuestions: Record<string, string | Question>;
-    // A general chat model as the decider, in Claude Code auto mode style. Off by default.
-    llm: LlmConfig;
+  withoutUi: {
+    // What happens to a call that needs a prompt when there is no UI to show it.
+    onAsk: "block" | "allow";
+    // Added to `rules` when there is no UI. A deny here wins over an allow in `rules`.
+    rules: { allow: string[]; deny: string[] };
   };
+  // What judges the calls the rules leave open. Left out of the file, it follows from the blocks
+  // there: `command` with an argv, then `classifier`, then `llm`. "none" only comes from a
+  // rejected 0.2 config that used a classifier, and then those calls ask.
+  decider: Decider | "none";
+  classifier: ClassifierConfig;
+  // A general chat model as the decider, in Claude Code auto mode style.
+  llm: LlmConfig;
+  // A classifier that runs as a local process, for example LANCET's classify.py. Each command
+  // goes to its stdin as a JSON line {"command", "shell", "cwd"} and it answers with a JSON line
+  // that has a `score` from 0 to 1. A leading `~/` in argv is expanded.
+  command: { argv: string[]; timeoutMs: number; askAbove: number };
 }
 
 export const DEFAULTS: Config = {
   enabled: true,
-  endpoint: "http://127.0.0.1:11438",
-  timeoutMs: 5000,
-  askAbove: 0.2,
-  startCommand: [],
-  withoutUi: "block",
   log: true,
   rules: { deny: [], ask: [], classify: [], allow: [] },
   allowedPaths: [],
   guardedPaths: [],
+  withoutUi: { onAsk: "block", rules: { allow: [], deny: [] } },
+  decider: "llm",
   // Of the question designs compared on bench-cases.json, one yes/no question with both answers
   // described was the best or within 0.01 AUC of it on Kev-0.8B and Laya.
   classifier: {
+    endpoint: "http://127.0.0.1:11438",
+    startCommand: [],
     provider: "",
     model: "kev",
-    command: [],
+    timeoutMs: 5000,
+    askAbove: 0.2,
     question: "Is this command risky?",
     risky: "Deletes data, touches files outside the project, changes the system, uses credentials, or sends data to a remote server",
     safe: "Routine development work that only reads, builds, tests or edits files inside the project directory",
     levels: [],
     extraQuestions: {},
-    llm: DEFAULT_LLM,
   },
+  llm: DEFAULT_LLM,
+  command: { argv: [], timeoutMs: 5000, askAbove: 0.2 },
 };
 
 // The guard's own files and Pi's settings: changes to them always ask.
@@ -134,110 +150,162 @@ const GUARDED = [HERE, path.dirname(CONFIG_FILE), path.join(AGENT_DIR, "settings
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isStrings = (v: unknown) => Array.isArray(v) && v.every((x) => typeof x === "string");
-const isOptional = (v: unknown, type: string) => v === undefined || typeof v === type;
+const isBool = (v: unknown) => typeof v === "boolean";
+const isString = (v: unknown) => typeof v === "string";
 const isThreshold = (v: unknown) => typeof v === "number" && v >= 0 && v <= 1;
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-const isStringList = (v: unknown) => v === undefined || isStrings(v);
-// Every key of classifier.llm is optional: what is left out keeps its default.
-const opt = (fn: (v: never) => boolean) => (v: unknown) => v === undefined || fn(v as never);
-const CHECKS_LLM: Record<keyof LlmConfig, (v: unknown) => boolean> = {
-  enabled: opt((v: boolean) => typeof v === "boolean"),
-  provider: opt((v: string) => typeof v === "string"),
-  model: opt((v: string) => typeof v === "string"),
-  name: opt((v: string) => typeof v === "string"),
-  contextWindow: opt((v: number) => typeof v === "number" && v >= 1024),
-  maxTokens: opt((v: number) => typeof v === "number" && v >= 16),
-  reasoning: opt((v: boolean) => typeof v === "boolean"),
-  thinkingLevel: opt((v: string) => typeof v === "string" && (v === "" || THINKING_LEVELS.includes(v))),
-  warmCache: opt((v: boolean) => typeof v === "boolean"),
-  twoStage: opt((v: boolean) => typeof v === "boolean"),
-  stage1MaxTokens: opt((v: number) => typeof v === "number" && v >= 4),
-  // AbortSignal.timeout throws above this.
-  timeoutMs: opt((v: number) => typeof v === "number" && v > 0 && v <= 2_147_483_647),
-  failClosed: opt((v: boolean) => typeof v === "boolean"),
-  onBlock: opt((v) => v === "block" || v === "ask"),
-  maxConsecutiveDenials: opt((v: number) => typeof v === "number" && v >= 1),
-  maxTotalDenials: opt((v: number) => typeof v === "number" && v >= 1),
-  transcript: opt((v: Record<string, unknown>) =>
-    isObject(v) &&
-    Object.keys(v).every((k) => k in DEFAULT_LLM.transcript) &&
-    ["maxEntries", "maxChars", "toolInputChars", "userMessageChars"].every((k) => v[k] === undefined || (typeof v[k] === "number" && v[k] > 0)) &&
-    ["includeAssistantText", "includeToolResults"].every((k) => v[k] === undefined || typeof v[k] === "boolean"),
-  ),
-  environment: isStringList,
-  hardDeny: isStringList,
-  softDeny: isStringList,
-  allow: isStringList,
-};
-
+const atLeast = (min: number) => (v: unknown) => typeof v === "number" && v >= min;
+const oneOf = (...values: string[]) => (v: unknown) => values.includes(v as string);
+// AbortSignal.timeout throws above this.
+const isTimeout = (v: unknown) => typeof v === "number" && v > 0 && v <= 2_147_483_647;
 const isQuestion = (v: unknown) =>
   typeof v === "string" ||
   (isObject(v) &&
     Object.keys(v).every((k) => ["question", "yes", "no", "askAbove"].includes(k)) &&
     typeof v.question === "string" &&
-    isOptional(v.yes, "string") &&
+    (v.yes === undefined || typeof v.yes === "string") &&
     typeof v.yes === typeof v.no &&
     (v.askAbove === undefined || isThreshold(v.askAbove)));
 
-const CHECKS: Record<keyof Config, (v: unknown) => boolean> = {
-  enabled: (v) => typeof v === "boolean",
-  endpoint: (v) => typeof v === "string" && URL.canParse(v),
-  timeoutMs: (v) => typeof v === "number" && v > 0,
-  askAbove: isThreshold,
-  startCommand: isStrings,
-  withoutUi: (v) => v === "block" || v === "allow",
-  log: (v) => typeof v === "boolean",
-  rules: (v) => isObject(v) && Object.entries(v).every(([k, list]) => k in DEFAULTS.rules && isStrings(list)),
+// Every key is optional: what the file leaves out keeps its default. A nested object is merged
+// over its default; anything with a check is replaced whole.
+type Check = (v: unknown) => boolean;
+interface Schema {
+  [key: string]: Check | Schema;
+}
+const SCHEMA: Schema = {
+  enabled: isBool,
+  log: isBool,
+  rules: { deny: isStrings, ask: isStrings, classify: isStrings, allow: isStrings },
   allowedPaths: isStrings,
   guardedPaths: isStrings,
-  classifier: (v) =>
-    isObject(v) &&
-    Object.keys(v).every((k) => k in DEFAULTS.classifier) &&
-    isOptional(v.provider, "string") &&
-    isOptional(v.model, "string") &&
-    (v.command === undefined || isStrings(v.command)) &&
-    isOptional(v.question, "string") &&
-    isOptional(v.risky, "string") &&
-    isOptional(v.safe, "string") &&
-    (v.levels === undefined || (isStrings(v.levels) && [0, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes((v.levels as string[]).length))) &&
-    (v.extraQuestions === undefined ||
-      (isObject(v.extraQuestions) && Object.entries(v.extraQuestions).every(([id, q]) => id !== "risky" && isQuestion(q)))) &&
-    (v.llm === undefined ||
-      (isObject(v.llm) &&
-        Object.keys(v.llm).every((k) => k in CHECKS_LLM) &&
-        Object.entries(CHECKS_LLM).every(([k, ok]) => ok(v.llm[k])))),
+  withoutUi: { onAsk: oneOf("block", "allow"), rules: { allow: isStrings, deny: isStrings } },
+  decider: oneOf("llm", "classifier", "command"),
+  classifier: {
+    endpoint: (v) => typeof v === "string" && URL.canParse(v),
+    startCommand: isStrings,
+    provider: isString,
+    model: isString,
+    timeoutMs: isTimeout,
+    askAbove: isThreshold,
+    question: isString,
+    risky: isString,
+    safe: isString,
+    levels: (v) => isStrings(v) && (v as string[]).length !== 1 && (v as string[]).length <= 10,
+    extraQuestions: (v) => isObject(v) && Object.entries(v).every(([id, q]) => id !== "risky" && isQuestion(q)),
+  },
+  llm: {
+    provider: isString,
+    model: isString,
+    name: isString,
+    contextWindow: (v) => v === 0 || atLeast(1024)(v),
+    maxTokens: atLeast(16),
+    thinkingLevel: oneOf("off", "minimal", "low", "medium", "high", "xhigh", "max"),
+    warmCache: isBool,
+    twoStage: isBool,
+    stage1MaxTokens: atLeast(4),
+    timeoutMs: isTimeout,
+    onNoAnswer: oneOf("block", "ask"),
+    onBlock: oneOf("block", "ask"),
+    maxConsecutiveDenials: atLeast(1),
+    maxTotalDenials: atLeast(1),
+    transcript: {
+      maxEntries: atLeast(1),
+      maxChars: atLeast(1),
+      toolInputChars: atLeast(1),
+      userMessageChars: atLeast(1),
+      includeAssistantText: isBool,
+      includeToolResults: isBool,
+    },
+    prompt: { environment: isStrings, hardDeny: isStrings, softDeny: isStrings, allow: isStrings },
+  },
+  command: { argv: isStrings, timeoutMs: isTimeout, askAbove: isThreshold },
+};
+
+// The first problem in `value`, naming its key. Own keys only, so "toString" is unknown.
+function problem(value: unknown, schema: Schema, at = ""): string | undefined {
+  if (!isObject(value)) return at ? `"${at.slice(0, -1)}" must be an object` : "it must be a JSON object";
+  for (const [key, v] of Object.entries(value)) {
+    if (!Object.hasOwn(schema, key)) return `unknown key "${at}${key}"`;
+    const check = schema[key];
+    const found = typeof check === "function" ? (check(v) ? undefined : `invalid value for "${at}${key}"`) : problem(v, check, `${at}${key}.`);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function merge(defaults: Record<string, unknown>, raw: Record<string, unknown>, schema: Schema): Record<string, unknown> {
+  const out = { ...defaults };
+  for (const [key, v] of Object.entries(raw)) {
+    const check = schema[key];
+    out[key] = typeof check === "function" ? v : merge(defaults[key] as Record<string, unknown>, v as Record<string, unknown>, check);
+  }
+  return out;
+}
+
+// Keys of the 0.2 shape, and where 0.3 put them.
+function moved(raw: Record<string, unknown>): string[] {
+  const classifier = isObject(raw.classifier) ? raw.classifier : {};
+  // The timeout and threshold belonged to whichever classifier the file used.
+  const owner = (key: string) => (Object.hasOwn(classifier, "command") && (key === "timeoutMs" || key === "askAbove") ? "command" : "classifier");
+  const out = ["endpoint", "timeoutMs", "askAbove", "startCommand"].filter((key) => Object.hasOwn(raw, key)).map((key) => `${key} is now ${owner(key)}.${key}`);
+  if (typeof raw.withoutUi === "string") out.push("withoutUi is now withoutUi.onAsk");
+  if (Object.hasOwn(classifier, "llm")) out.push('classifier.llm is now llm, picked with "decider": "llm", and its keys changed');
+  if (Object.hasOwn(classifier, "command")) out.push('classifier.command is now command.argv, picked with "decider": "command"');
+  return out;
+}
+
+// Top-level keys with the same meaning in 0.2 and 0.3.
+const UNCHANGED = ["enabled", "log", "rules", "allowedPaths", "guardedPaths"];
+const compiles = (part: Partial<Config>) => {
+  try {
+    compileRules(part.rules ?? {});
+    return true;
+  } catch {
+    return false;
+  }
 };
 
 // A config with any error is ignored as a whole, so a typo cannot half-apply.
 export function loadConfig(file = CONFIG_FILE): { config: Config; error?: string } {
   if (!fs.existsSync(file)) return { config: DEFAULTS };
+  const ignored = (why: string) => ({ config: DEFAULTS, error: `${file} ignored, using defaults: ${why}` });
+  let raw: unknown;
   try {
-    const raw = JSON.parse(fs.readFileSync(file, "utf8"));
-    if (!isObject(raw)) throw new Error("it must be a JSON object");
-    for (const [key, value] of Object.entries(raw)) {
-      if (!(key in CHECKS)) throw new Error(`unknown key "${key}"`);
-      if (!CHECKS[key as keyof Config](value)) throw new Error(`invalid value for "${key}"`);
-    }
-    const config: Config = {
-      ...DEFAULTS,
-      ...raw,
-      rules: { ...DEFAULTS.rules, ...(raw.rules as object) },
-      classifier: {
-        ...DEFAULTS.classifier,
-        ...(raw.classifier as object),
-        llm: {
-          ...DEFAULTS.classifier.llm,
-          ...((raw.classifier as Record<string, unknown>)?.llm as object),
-          transcript: { ...DEFAULTS.classifier.llm.transcript, ...(((raw.classifier as Record<string, unknown>)?.llm as Record<string, unknown>)?.transcript as object) },
-        },
-      } as Config["classifier"],
-    };
-    compileRules(config.rules);
-    return { config };
+    raw = JSON.parse(fs.readFileSync(file, "utf8"));
   } catch (e) {
-    return { config: DEFAULTS, error: `${file} ignored, using defaults: ${(e as Error).message}` };
+    return ignored((e as Error).message);
   }
+  const old = isObject(raw) ? moved(raw) : [];
+  if (isObject(raw) && old.length) {
+    // The keys 0.3 did not change still apply, so your own deny rules keep blocking.
+    const same = Object.fromEntries(Object.entries(raw).filter(([key]) => UNCHANGED.includes(key)));
+    const usable = !problem(same, SCHEMA) && compiles(same as Partial<Config>);
+    const kept = usable ? Object.keys(same) : [];
+    const base = usable ? (merge(DEFAULTS as unknown as Record<string, unknown>, same, SCHEMA) as unknown as Config) : DEFAULTS;
+    // In 0.2 a config that did not turn on the chat decider used a classifier. The default chat
+    // decider would send its commands to a model it never picked, so those calls ask instead.
+    const llm = isObject(raw.classifier) && isObject(raw.classifier.llm) && raw.classifier.llm.enabled === true;
+    return {
+      config: llm ? base : { ...base, decider: "none" },
+      error:
+        `${file} has the 0.2 shape, so ${kept.length ? `only its ${kept.join(", ").replace(/, ([^,]+)$/, " and $1")} ${kept.length > 1 ? "are" : "is"} used` : "it is ignored"} and the rest is default` +
+        `${llm ? "" : ", with no decider: what one would judge asks you"}. In 0.3 ${old.join("; ")}. Every key is in ${EXAMPLE_FILE}.`,
+    };
+  }
+  const found = problem(raw, SCHEMA);
+  if (found) return ignored(found);
+  const config = merge(DEFAULTS as unknown as Record<string, unknown>, raw as Record<string, unknown>, SCHEMA) as unknown as Config;
+  const given = raw as Partial<Record<keyof Config, unknown>>;
+  config.decider = (given.decider as Decider | undefined) ?? (config.command.argv.length ? "command" : given.classifier ? "classifier" : "llm");
+  if (config.decider === "command" && !config.command.argv.length) return ignored('"decider" is "command" and command.argv is empty');
+  try {
+    compileRules({ ...config.rules, allow: [...config.rules.allow, ...config.withoutUi.rules.allow], deny: [...config.rules.deny, ...config.withoutUi.rules.deny] });
+  } catch (e) {
+    return ignored((e as Error).message);
+  }
+  return { config };
 }
+
 
 // Pi's registry calls a yes/no question "bool" and requires both answers to be described.
 export function buildQuestions(config: Config) {
@@ -255,9 +323,12 @@ export function buildQuestions(config: Config) {
 
 // The first question answered at or above its threshold, the main question first.
 export function flagged(config: Config, answers: Record<string, number>): string | undefined {
-  if (answers.risky >= config.askAbove) return `model risk ${answers.risky.toFixed(2)} (asks at ${config.askAbove} and above)`;
+  const viaProcess = config.decider === "command";
+  const askAbove = viaProcess ? config.command.askAbove : config.classifier.askAbove;
+  if (answers.risky >= askAbove) return `model risk ${answers.risky.toFixed(2)} (asks at ${askAbove} and above)`;
+  if (viaProcess) return undefined;
   for (const [id, q] of Object.entries(config.classifier.extraQuestions)) {
-    const threshold = (typeof q === "string" ? undefined : q.askAbove) ?? config.askAbove;
+    const threshold = (typeof q === "string" ? undefined : q.askAbove) ?? askAbove;
     if (answers[id] >= threshold) return `model says yes to "${id}": ${answers[id].toFixed(2)} (asks at ${threshold} and above)`;
   }
   return undefined;
@@ -293,7 +364,7 @@ function readAnswers(config: Config, ids: string[], raw: Record<string, unknown>
 
 async function health(config: Config, timeoutMs: number): Promise<boolean> {
   try {
-    return (await fetch(`${config.endpoint}/health`, { signal: AbortSignal.timeout(timeoutMs) })).ok;
+    return (await fetch(`${config.classifier.endpoint}/health`, { signal: AbortSignal.timeout(timeoutMs) })).ok;
   } catch {
     return false;
   }
@@ -302,9 +373,10 @@ async function health(config: Config, timeoutMs: number): Promise<boolean> {
 let lastStart = 0;
 // Runs startCommand and waits until the endpoint answers. At most one attempt per 30 s.
 async function startServer(config: Config, waitMs: number): Promise<boolean> {
-  if (!config.startCommand.length || Date.now() - lastStart < 30_000) return false;
+  const { startCommand } = config.classifier;
+  if (!startCommand.length || Date.now() - lastStart < 30_000) return false;
   lastStart = Date.now();
-  spawn(config.startCommand[0], config.startCommand.slice(1), { stdio: "ignore", detached: true })
+  spawn(startCommand[0], startCommand.slice(1), { stdio: "ignore", detached: true })
     .on("error", () => {})
     .unref();
   for (const deadline = Date.now() + waitMs; Date.now() < deadline; ) {
@@ -316,7 +388,7 @@ async function startServer(config: Config, waitMs: number): Promise<boolean> {
 
 // ---- classifier process ----
 
-// `classifier.command`: the process stays up between calls and gets one command at a time.
+// `command.argv`: the process stays up between calls and gets one command at a time.
 // Every Pi process has its own, so it starts on the first command the rules leave to it and
 // stops after CLASSIFIER_IDLE_MS without one.
 const CLASSIFIER_IDLE_MS = 5 * 60_000;
@@ -374,13 +446,14 @@ function askClassifierProcess(config: Config, state: Record<string, string>, sig
     const startedAt = performance.now();
     const ms = () => Math.round(performance.now() - startedAt);
     const program = classifierName(config);
-    if (classifierProcess?.key !== config.classifier.command.join("\0")) stopClassifierProcess();
-    const proc = (classifierProcess ??= startClassifierProcess(config.classifier.command));
+    const { argv, timeoutMs } = config.command;
+    if (classifierProcess?.key !== argv.join("\0")) stopClassifierProcess();
+    const proc = (classifierProcess ??= startClassifierProcess(argv));
     proc.buffer = "";
     let timer: NodeJS.Timeout | undefined;
     let abort: (() => void) | undefined;
     const line = await new Promise<string | undefined | "timeout" | "cancelled">((resolve) => {
-      timer = setTimeout(() => resolve("timeout"), config.timeoutMs);
+      timer = setTimeout(() => resolve("timeout"), timeoutMs);
       abort = () => resolve("cancelled");
       signal?.addEventListener("abort", abort, { once: true });
       proc.waiting = resolve;
@@ -394,7 +467,7 @@ function askClassifierProcess(config: Config, state: Record<string, string>, sig
     if (line === "timeout" || line === "cancelled") {
       // Its late answer would be read as the answer to the next command.
       stopClassifierProcess();
-      return { error: line === "timeout" ? `no answer in ${config.timeoutMs} ms` : "the call was cancelled", ms: ms() };
+      return { error: line === "timeout" ? `no answer in ${timeoutMs} ms` : "the call was cancelled", ms: ms() };
     }
     if (line === undefined) return { error: `the classifier process ${program} is not running`, ms: ms() };
     let answer: { score?: unknown; reason?: unknown } | undefined;
@@ -435,23 +508,21 @@ export interface ChatRegistry {
 export type LlmDecision =
   | { block: false; why: string; stage: string; ms: number; tokens?: number }
   | { block: true; category?: string; reason: string; stage: string; ms: number; tokens?: number }
-  // `unparsed`: the model answered, but not with a verdict.
-  | { error: string; unparsed?: boolean; ms: number; tokens?: number };
-
-export const llmEnabled = (config: Config) => config.classifier.llm.enabled;
+  // `unparsed`: the model answered, but not with a verdict. `lasting`: asking again fails the same
+  // way (no such model, or the call does not fit its window).
+  | { error: string; unparsed?: boolean; lasting?: boolean; ms: number; tokens?: number };
 
 export const llmName = (llm: LlmConfig, sessionModelId?: string) =>
   llm.name || (llm.provider || llm.model ? [llm.provider, llm.model].filter(Boolean).join("/") : sessionModelId || "session model");
 
-// A system prompt that never changes is what makes a 30k-token prompt cheap: every later call is
+// A system prompt that never changes is what makes a 25k-token prompt cheap: every later call is
 // a prefix cache hit and only pays for the transcript. So it is built once per process.
 let promptCache: { key: string; prompt: string } | undefined;
 export function systemPrompt(config: Config): string {
-  const llm = config.classifier.llm;
-  const { includeAssistantText, includeToolResults } = llm.transcript;
-  const key = JSON.stringify([llm.environment, llm.hardDeny, llm.softDeny, llm.allow, includeAssistantText, includeToolResults]);
-  if (!promptCache || promptCache.key !== key)
-    promptCache = { key, prompt: buildSystemPrompt(mergeRules(DEFAULT_RULES, llm as LlmRules), { includeAssistantText, includeToolResults }) };
+  const { prompt, transcript } = config.llm;
+  const { includeAssistantText, includeToolResults } = transcript;
+  const key = JSON.stringify([prompt, includeAssistantText, includeToolResults]);
+  if (!promptCache || promptCache.key !== key) promptCache = { key, prompt: buildSystemPrompt(mergeRules(DEFAULT_RULES, prompt), { includeAssistantText, includeToolResults }) };
   return promptCache.prompt;
 }
 
@@ -465,7 +536,7 @@ interface Resolved {
 }
 
 function resolveModel(registry: ChatRegistry, config: Config, sessionModel?: Record<string, unknown>): Resolved {
-  const llm = config.classifier.llm;
+  const llm = config.llm;
   // Both empty: the session's own model. A model name without a provider is looked up in the
   // provider the session is using. A configured model Pi does not have is an error rather than a
   // quiet switch to the session model, which may be a hosted one.
@@ -479,12 +550,12 @@ function resolveModel(registry: ChatRegistry, config: Config, sessionModel?: Rec
     ...b,
     contextWindow: llm.contextWindow || Number(b.contextWindow) || 8192,
     maxTokens: llm.maxTokens || Number(b.maxTokens) || 1024,
-    reasoning: llm.reasoning ? Boolean(b.reasoning) : false,
+    reasoning: llm.thinkingLevel !== "off" && Boolean(b.reasoning),
   };
   return { model, llm };
 }
 
-const thinks = ({ model, llm }: Resolved) => Boolean(model.reasoning && llm.thinkingLevel && llm.thinkingLevel !== "off");
+const thinks = ({ model }: Resolved) => Boolean(model.reasoning);
 
 async function askOnce(
   registry: ChatRegistry,
@@ -536,20 +607,20 @@ export async function decideWithLlm(
 ): Promise<LlmDecision> {
   const started = performance.now();
   const ms = () => Math.round(performance.now() - started);
-  const llm = config.classifier.llm;
-  if (!registry) return { error: "no model registry", ms: ms() };
+  const llm = config.llm;
+  if (!registry) return { error: "no model registry", lasting: true, ms: ms() };
   const resolved = resolveModel(registry, config, sessionModel);
-  if (resolved.error) return { error: resolved.error, ms: ms() };
+  if (resolved.error) return { error: resolved.error, lasting: true, ms: ms() };
   const system = systemPrompt(config);
 
   // Fit the request to the window: shrink the transcript, and only give up when even a short one
   // does not fit. A model that is cut off mid-prompt would answer about the wrong action.
   const window = Number(resolved.model.contextWindow);
   const budget = Math.max(0, window - llm.maxTokens - 512) * CHARS_PER_TOKEN - system.length;
-  if (budget < 2000) return { error: `the rule prompt is ${system.length} chars and the model window is ${window} tokens: too small to classify`, ms: ms() };
+  if (budget < 2000) return { error: `the rule prompt is ${system.length} chars and the model window is ${window} tokens: too small to classify`, lasting: true, ms: ms() };
   // The action goes in whole or not at all; the lines before it get the room that is left.
   const actionChars = buildTranscript(items.slice(-1), llm.transcript).length;
-  if (actionChars > budget) return { error: `the action is ${actionChars} chars and the model window has room for ${budget}`, ms: ms() };
+  if (actionChars > budget) return { error: `the action is ${actionChars} chars and the model window has room for ${budget}`, lasting: true, ms: ms() };
   const transcript = buildTranscript(items, { ...llm.transcript, maxChars: Math.min(llm.transcript.maxChars, budget - actionChars) });
   const send = (instruction: string, opts: { maxTokens: number; thinking: boolean }) =>
     askOnce(registry, resolved, system, `${transcript}\n\n${instruction}`, { ...opts, signal });
@@ -718,26 +789,27 @@ function saveToConfig(list: "allowedPaths" | "allow", value: string): string | u
 }
 
 // What answers the questions, for the log and the status command.
-export const classifierName = ({ classifier }: Config) =>
-  classifier.command.length
-    ? classifier.command.filter((word) => !word.startsWith("-")).slice(0, 2).map((word) => path.basename(word)).join(" ")
+export const classifierName = ({ decider, classifier, command }: Config) =>
+  decider === "command"
+    ? command.argv.filter((word) => !word.startsWith("-")).slice(0, 2).map((word) => path.basename(word)).join(" ")
     : classifier.provider
       ? `${classifier.provider}/${classifier.model}`
       : classifier.model;
 
+// The answer of the classifier decider, or of the classifier process with decider "command".
 export async function classify(config: Config, state: Record<string, string>, signal?: AbortSignal, registry?: Registry): Promise<Classified> {
-  if (config.classifier.command.length) return askClassifierProcess(config, state, signal);
+  if (config.decider === "command") return askClassifierProcess(config, state, signal);
   const started = performance.now();
   const ms = () => Math.round(performance.now() - started);
   const questions = buildQuestions(config);
   const ids = Object.keys(questions);
-  const timedOut = { error: `no answer in ${config.timeoutMs} ms`, ms: 0 };
-  const { provider, model: expected } = config.classifier;
+  const { endpoint, provider, model: expected, timeoutMs } = config.classifier;
+  const timedOut = { error: `no answer in ${timeoutMs} ms`, ms: 0 };
 
   if (provider) {
     const model = registry?.findOfType("classifier", provider, expected);
     if (!registry || !model) return { error: `Pi has no classifier model ${provider}/${expected}`, ms: ms() };
-    const timeout = AbortSignal.timeout(config.timeoutMs);
+    const timeout = AbortSignal.timeout(timeoutMs);
     // classify() never rejects; a failure comes back as a stop reason.
     const result = await registry.classify(model, { state, questions }, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
     if (timeout.aborted) return { ...timedOut, ms: ms() };
@@ -748,8 +820,8 @@ export async function classify(config: Config, state: Record<string, string>, si
 
   for (let attempt = 0; ; attempt++) {
     try {
-      const timeout = AbortSignal.timeout(config.timeoutMs);
-      const res = await fetch(`${config.endpoint}/v1/systemone`, {
+      const timeout = AbortSignal.timeout(timeoutMs);
+      const res = await fetch(`${endpoint}/v1/systemone`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ state, questions }),
@@ -769,8 +841,8 @@ export async function classify(config: Config, state: Record<string, string>, si
     } catch (e) {
       const err = e as Error & { cause?: { code?: string } };
       if (err.name === "TimeoutError") return { ...timedOut, ms: ms() };
-      if (attempt === 0 && err.cause?.code === "ECONNREFUSED" && (await startServer(config, config.timeoutMs))) continue;
-      return { error: `server not reachable at ${config.endpoint}`, ms: ms() };
+      if (attempt === 0 && err.cause?.code === "ECONNREFUSED" && (await startServer(config, timeoutMs))) continue;
+      return { error: `server not reachable at ${endpoint}`, ms: ms() };
     }
   }
 }
@@ -790,9 +862,20 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
   const loaded = loadConfig();
   const config = { ...loaded.config, ...overrides };
   const configError = loaded.error;
-  // The user's rules, plus the allow patterns picked in a prompt during this session.
+  // The user's rules, plus the patterns saved with Always allow during this session. Without a
+  // UI the withoutUi rules are added.
   const allowPatterns = [...config.rules.allow];
-  let rules = compileRules(config.rules);
+  // Patterns allowed for this session in a prompt. They never replace a firm ask (rules.ts).
+  const picked: string[] = [];
+  let pickedRules = compileRules({}).allow;
+  const compile = () => {
+    const { allow, deny } = config.withoutUi.rules;
+    return {
+      ui: compileRules({ ...config.rules, allow: allowPatterns }),
+      headless: compileRules({ ...config.rules, allow: [...allowPatterns, ...allow], deny: [...config.rules.deny, ...deny] }),
+    };
+  };
+  let rules = compile();
   const allowedPaths = [...config.allowedPaths];
   const guarded = [...GUARDED, ...config.guardedPaths];
   let enabled = config.enabled;
@@ -803,8 +886,9 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
   const sessionAllowed = new Set<string>();
   // Files the session wrote or downloaded, as far as the rules saw it.
   const files: SessionFiles = new Map();
-  // Git checkouts per working directory, as they were when the session first used it. A
-  // worktree added later asks once, so `git worktree add` cannot open a folder by itself.
+  // Git checkouts per working directory, as they were when the session first used it. A worktree
+  // added later counts only inside the folder that holds the main checkout, so `git worktree add`
+  // cannot open an arbitrary folder.
   const repositories = new Map<string, string[]>();
   // Calls this guard held back, by tool call id, for the outcome lines the decider reads.
   const decided = new Map<string, Outcome>();
@@ -815,12 +899,11 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
     if (configError && ctx.hasUI) ctx.ui.notify(`pi-automode-classifier: ${configError}`, "warning");
     // Warm the server in the background so the first classified call does not wait for it. The
     // chat decider takes its place, so then it is not needed.
-    if (enabled && !config.classifier.llm.enabled && !config.classifier.command.length && !config.classifier.provider)
-      void health(config, 300).then((up) => up || startServer(config, 10_000));
+    if (enabled && config.decider === "classifier" && !config.classifier.provider) void health(config, 300).then((up) => up || startServer(config, 10_000));
     // With the chat decider the fixed rule prompt is some 25k tokens, and a cold prefill costs
     // the first real call tens of seconds. One throwaway call fills the prefix cache instead.
-    if (enabled && config.classifier.llm.enabled && config.classifier.llm.warmCache) {
-      const warm = [{ kind: "user", text: "warming the rule prompt" }, { kind: "action", tool: "bash", input: { command: "true" } }];
+    if (enabled && config.decider === "llm" && config.llm.warmCache) {
+      const warm: TranscriptItem[] = [{ kind: "user", text: "warming the rule prompt" }, { kind: "action", tool: "bash", input: { command: "true" } }];
       void decideWithLlm(config, warm, undefined, ctx.modelRegistry as unknown as ChatRegistry, ctx.model as unknown as Record<string, unknown>).catch(() => undefined);
     }
   });
@@ -829,9 +912,19 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
   pi.on("tool_call", async (event, ctx) => {
     if (!enabled) return undefined;
     const input = event.input as Record<string, unknown>;
-    if (!repositories.has(ctx.cwd)) repositories.set(ctx.cwd, checkouts(ctx.cwd));
+    const now = checkouts(ctx.cwd);
+    if (!repositories.has(ctx.cwd)) repositories.set(ctx.cwd, now);
     const roots = repositories.get(ctx.cwd)!;
-    const scope = makeScope(ctx.cwd, guarded, { rules, allowedPaths: [...allowedPaths, ...roots], files, project: (p) => inCheckout(p, roots), chatDecider: llmEnabled(config) });
+    const parent = path.dirname(now[0] ?? "/");
+    for (const dir of now) if (!roots.includes(dir) && !isRootLike(parent) && within(dir, parent)) roots.push(dir);
+    const scope = makeScope(ctx.cwd, guarded, {
+      rules: ctx.hasUI ? rules.ui : rules.headless,
+      picked: pickedRules,
+      allowedPaths: [...allowedPaths, ...roots],
+      files,
+      project: (p) => inCheckout(p, roots),
+      chatDecider: config.decider === "llm",
+    });
     let subject: string;
     let verdict: Verdict;
     if (typeof input.command === "string") {
@@ -856,18 +949,20 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
     const held = (outcome: Outcome) => {
       if (event.toolCallId) decided.set(event.toolCallId, outcome);
     };
-    const key = `${event.toolName}\0${ctx.cwd}\0${subject}`;
+    // A call allowed while it was not critical asks again once the same text is, for example a
+    // script that a download has since replaced.
+    const key = `${verdict.critical ? "critical" : ""}\0${event.toolName}\0${ctx.cwd}\0${subject}`;
     // The user allowed this exact call for the session, so no model gets to block it again.
     if (verdict.action === "classify" && sessionAllowed.has(key)) {
       finish("allow", "session");
       return undefined;
     }
 
-    if (verdict.action === "classify" && llmEnabled(config)) {
-      const llm = config.classifier.llm;
+    if (verdict.action === "classify" && config.decider === "llm") {
+      const llm = config.llm;
       const branch = (ctx.sessionManager?.getBranch?.() ?? []) as { message?: Record<string, unknown> }[];
-      const files = verdict.files?.length ? fileContents(verdict.files) : undefined;
-      const items = transcriptItems(branch, llm, { tool: event.toolName, input, id: event.toolCallId, files }, decided);
+      const actionFiles = verdict.files?.length ? fileContents(verdict.files) : undefined;
+      const items = transcriptItems(branch, llm, { tool: event.toolName, input, id: event.toolCallId, files: actionFiles }, decided);
       const decision = await decideWithLlm(config, items, ctx.signal, ctx.modelRegistry as unknown as ChatRegistry, ctx.model as unknown as Record<string, unknown>);
       Object.assign(entry, { model: llmName(llm, ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined), llm: { stage: "stage" in decision ? decision.stage : undefined, tokens: "tokens" in decision ? decision.tokens : undefined } });
 
@@ -875,13 +970,16 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
         entry.llmError = decision.error;
         // Claude Code's iron gate: with no answer the call is held back, not waved through. Without
         // a UI an ask would fall to `withoutUi`, and a non-answer is easier to cause than an allow.
-        if (!llm.failClosed && ctx.hasUI) {
-          verdict = { action: "ask", reason: `the decider gave no answer (${decision.error})`, pattern: verdict.pattern };
+        if (llm.onNoAnswer === "ask" && ctx.hasUI) {
+          verdict = { ...verdict, action: "ask", reason: `the decider gave no answer (${decision.error})` };
         } else {
           counts.blocked++;
           held(decision.unparsed ? "automode-parsing-error" : "automode-unavailable");
           log(config, { ...entry, outcome: "block", by: "llm-unavailable" });
-          return { block: true, reason: denyMessage(`auto mode classifier unavailable: ${decision.error}. This was not a policy decision; retrying the same action is appropriate if the user asked for it.`) };
+          const retry = decision.lasting
+            ? "retrying the same action fails the same way, so tell the user"
+            : "retrying the same action is appropriate if the user asked for it";
+          return { block: true, reason: denyMessage(`auto mode classifier unavailable: ${decision.error}. This was not a policy decision; ${retry}.`) };
         }
       } else if (decision.block) {
         entry.llmCategory = decision.category;
@@ -900,13 +998,15 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
           return { block: true, reason: denyMessage(decision.reason) };
         }
         const why = exhausted ? `${decision.reason} (${denials.consecutive} denials in a row, ${denials.total} this session)` : decision.reason;
-        verdict = { action: "ask", reason: why, pattern: verdict.pattern };
+        verdict = { ...verdict, action: "ask", reason: why };
       } else {
         denials.consecutive = 0;
         counts.model++;
         finish("allow", "llm");
         return undefined;
       }
+    } else if (verdict.action === "classify" && config.decider === "none") {
+      verdict = { ...verdict, action: "ask" };
     } else if (verdict.action === "classify") {
       const result = await classify(config, { tool: event.toolName, cwd: ctx.cwd, command: subject }, ctx.signal, ctx.modelRegistry as unknown as Registry);
       Object.assign(entry, result, { model: classifierName(config) });
@@ -916,7 +1016,7 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
         finish("allow", "model");
         return undefined;
       }
-      verdict = { action: "ask", reason, pattern: verdict.pattern };
+      verdict = { ...verdict, action: "ask", reason };
     }
 
     if (verdict.action === "allow") {
@@ -937,7 +1037,8 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
       return undefined;
     }
     if (!ctx.hasUI) {
-      if (config.withoutUi === "allow") {
+      // Root, credentials, downloaded code and the guard's own files never run unasked.
+      if (config.withoutUi.onAsk === "allow" && !verdict.critical && !verdict.locked) {
         finish("allow", "no-ui");
         return undefined;
       }
@@ -948,23 +1049,27 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
     }
 
     counts.asked++;
-    const title = `Auto mode: allow ${event.toolName}?\n${verdict.reason}\n\n${clip(subject, 1200)}`;
+    // While the config file is ignored every prompt says so, since the defaults decide differently.
+    const title = `Auto mode: allow ${event.toolName}?\n${verdict.reason}\n\n${clip(subject, 1200)}${configError ? `\n\n${configError}` : ""}`;
     // A change outside the working directory can be allowed for its whole folder, and a command
-    // the rules do not know for its pattern, so the next one does not ask again. Both can also
-    // be saved to the config file.
+    // for its pattern, so the next one does not ask again. A folder and the pattern of a command
+    // the rules do not know can also be saved to the config file.
     const dir = verdict.dir?.replace(HOME, "~");
     const covers = dir ? `changes in ${dir}` : verdict.pattern ? `"${verdict.pattern}"` : undefined;
     const forSession = covers ? `Allow ${covers} for this session` : "Allow for this session";
-    const always = covers ? `Always allow ${covers}` : undefined;
+    const always = covers && !(verdict.pattern && verdict.fromAsk) ? `Always allow ${covers}` : undefined;
     const answer = prompts.then(() => ctx.ui.select(title, ["Allow once", forSession, ...(always ? [always] : []), "Block"], { signal: ctx.signal }));
     prompts = answer.catch(() => undefined);
     const choice = await answer;
     const wider = choice === forSession || (always !== undefined && choice === always);
     if (wider) {
       if (verdict.dir) allowedPaths.push(verdict.dir);
-      else if (verdict.pattern) {
+      else if (verdict.pattern && choice === always) {
         allowPatterns.push(verdict.pattern);
-        rules = compileRules({ ...config.rules, allow: allowPatterns });
+        rules = compile();
+      } else if (verdict.pattern) {
+        picked.push(verdict.pattern);
+        pickedRules = compileRules({ allow: picked }).allow;
       } else sessionAllowed.add(key);
     }
     if (always !== undefined && choice === always) {
@@ -988,23 +1093,32 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
       const arg = args.trim();
       if (arg === "on" || arg === "off") enabled = arg === "on";
       else if (arg && arg !== "status") return ctx.ui.notify("Usage: /automode-classifier status | on | off", "warning");
-      const { provider, model, command, llm } = config.classifier;
-      const rulesInUse = mergeRules(DEFAULT_RULES, llm as LlmRules);
-      const where = llm.enabled
-        ? `chat decider ${llmName(llm, ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined)} (${llm.twoStage ? "two-stage" : "one stage"}, thinking ${llm.reasoning ? llm.thinkingLevel || "off" : "off"}), blocks by ${llm.onBlock}, ${llm.failClosed ? "fails closed" : "asks when it cannot answer"}`
-        : command.length
-          ? `classifier process ${command.join(" ")}: ${classifierProcess ? "running" : "not running"}`
-          : provider
-            ? `model ${provider}/${model} through Pi (commands are sent to ${provider})`
-            : `model server ${config.endpoint}: ${(await health(config, 500)) ? "up" : "down"}`;
-      const extra = Object.keys(config.classifier.extraQuestions);
+      const { llm, classifier, command } = config;
+      let where: string;
+      if (config.decider === "llm") {
+        const lists = mergeRules(DEFAULT_RULES, llm.prompt);
+        where =
+          `chat decider ${llmName(llm, ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined)} (${llm.twoStage ? "two-stage" : "one stage"}, thinking ${llm.thinkingLevel}), ` +
+          `blocks by ${llm.onBlock}, ${llm.onNoAnswer === "block" ? "fails closed" : "asks when it cannot answer"}; ` +
+          `${lists.hardDeny.length} hard block, ${lists.softDeny.length} soft block, ${lists.allow.length} allow, ${lists.environment.length} environment lines; ` +
+          `transcript ${llm.transcript.maxEntries} entries / ${llm.transcript.maxChars} chars`;
+      } else if (config.decider === "command") {
+        where = `classifier process ${command.argv.join(" ")}: ${classifierProcess ? "running" : "not running"} (asks at risk >= ${command.askAbove})`;
+      } else if (config.decider === "classifier") {
+        const extra = Object.keys(classifier.extraQuestions);
+        where =
+          (classifier.provider
+            ? `model ${classifier.provider}/${classifier.model} through Pi (commands are sent to ${classifier.provider})`
+            : `model server ${classifier.endpoint}: ${(await health(config, 500)) ? "up" : "down"}`) +
+          ` (asks at risk >= ${classifier.askAbove})${extra.length ? `, extra questions: ${extra.join(", ")}` : ""}`;
+      } else where = "no decider while the config file is ignored: what one would judge asks you";
+      const headless = config.withoutUi.rules;
       ctx.ui.notify(
         [
           `pi-automode-classifier: ${enabled ? "on" : "OFF for this session"}`,
-          llm.enabled
-            ? `${where}; ${rulesInUse.hardDeny.length} hard block, ${rulesInUse.softDeny.length} soft block, ${rulesInUse.allow.length} allow, ${rulesInUse.environment.length} environment lines; transcript ${llm.transcript.maxEntries} entries / ${llm.transcript.maxChars} chars`
-            : `${where} (asks at risk >= ${config.askAbove})${extra.length ? `, extra questions: ${extra.join(", ")}` : ""}`,
-          `your rules: ${rules.deny.length} deny, ${rules.ask.length} ask, ${rules.classify.length} classify, ${rules.allow.length} allow; ${allowedPaths.length} allowed paths`,
+          where,
+          `your rules: ${rules.ui.deny.length} deny, ${rules.ui.ask.length} ask, ${rules.ui.classify.length} classify, ${rules.ui.allow.length} allow; ${allowedPaths.length} allowed paths`,
+          `without a UI: asks ${config.withoutUi.onAsk === "allow" ? "run" : "are blocked"}${headless.allow.length || headless.deny.length ? `, plus ${headless.deny.length} deny and ${headless.allow.length} allow rules` : ""}`,
           `this session: ${counts.rule} allowed by rule, ${counts.model} by model, ${counts.asked} asked, ${counts.blocked} blocked${denials.total ? `; decider denials ${denials.total} (${denials.consecutive} in a row)` : ""}`,
           `config: ${CONFIG_FILE}${fs.existsSync(CONFIG_FILE) ? "" : " (not present, defaults in use)"}`,
           config.log ? `log: ${LOG_FILE}` : "log: off",

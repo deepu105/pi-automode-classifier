@@ -6,8 +6,8 @@
 // Needs a Node that runs TypeScript directly (22.18 or newer) and the model server running.
 // With `classifier.provider` set (or a provider/model argument) the questions go through Pi's
 // model registry with Pi's credentials, so `pi` must be installed; the 50 commands are then
-// sent to that provider. With `classifier.command` set in the config the commands go to that
-// classifier process. The bench runs outside a git checkout, so the rules for project files
+// sent to that provider. With `"decider": "command"` in the config the commands go to the
+// classifier process in `command.argv`. The bench runs outside a git checkout, so the rules for project files
 // do not apply to it.
 // Usage: node bench.mjs [askAbove] [endpoint | provider/model]
 //   node bench.mjs 0.2 http://127.0.0.1:11439
@@ -21,14 +21,16 @@ const here = import.meta.dirname;
 const { classify, classifierName, classifierProcessPid, loadConfig, DEFAULTS } = await import("./index.ts");
 const { bashVerdict, makeScope } = await import("./rules.ts");
 
-// The bench measures a server that is already running, with your `classifier` section and
-// `askAbove`. Your own rules and extra questions are left out so runs stay comparable.
+// The bench measures a server that is already running, with your `classifier` block, or your
+// `command` block when that is your decider. Your own rules and extra questions are left out so
+// runs stay comparable.
 const mine = loadConfig().config;
 const target = process.argv[3] ?? "";
-const config = { ...DEFAULTS, endpoint: mine.endpoint, classifier: { ...mine.classifier, extraQuestions: {} } };
-if (/^https?:/.test(target)) config.endpoint = target;
-else if (target) Object.assign(config.classifier, { command: [], provider: target.slice(0, target.indexOf("/")), model: target.slice(target.indexOf("/") + 1) });
-const askAbove = Number(process.argv[2] ?? mine.askAbove);
+const config = { ...DEFAULTS, decider: mine.decider === "command" && !target ? "command" : "classifier", classifier: { ...mine.classifier, extraQuestions: {} }, command: mine.command };
+if (/^https?:/.test(target)) config.classifier.endpoint = target;
+else if (target) Object.assign(config.classifier, { provider: target.slice(0, target.indexOf("/")), model: target.slice(target.indexOf("/") + 1) });
+const viaProcess = config.decider === "command";
+const askAbove = Number(process.argv[2] ?? (viaProcess ? config.command : config.classifier).askAbove);
 
 // Pi's own model registry, for provider mode. Pi is a peer dependency, so when it is not
 // installed next to this package it is loaded from the `pi` on PATH.
@@ -39,7 +41,6 @@ async function piRegistry() {
   });
   return new pi.ModelRegistry(await pi.ModelRuntime.create());
 }
-const viaProcess = config.classifier.command.length > 0;
 const registry = config.classifier.provider && !viaProcess ? await piRegistry() : undefined;
 // Does not need to exist; the rules only need a project root that is not $HOME.
 const cwd = path.join(os.homedir(), "project");
@@ -93,7 +94,7 @@ if (registry) {
   try {
     const pid = viaProcess
       ? classifierProcessPid()
-      : execFileSync("ss", ["-ltnpH"], { encoding: "utf8" }).split("\n").find((l) => l.includes(`:${new URL(config.endpoint).port} `))?.match(/pid=(\d+)/)?.[1];
+      : execFileSync("ss", ["-ltnpH"], { encoding: "utf8" }).split("\n").find((l) => l.includes(`:${new URL(config.classifier.endpoint).port} `))?.match(/pid=(\d+)/)?.[1];
     const status = fs.readFileSync(`/proc/${pid}/status`, "utf8");
     const mb = (key) => Math.round(Number(status.match(new RegExp(`${key}:\\s+(\\d+)`))[1]) / 1024);
     console.log(`${viaProcess ? "process" : "server"} memory: ${mb("VmRSS")} MB (${mb("RssAnon")} MB private, ${mb("RssFile")} MB model file mapped)`);

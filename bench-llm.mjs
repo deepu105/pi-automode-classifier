@@ -1,4 +1,4 @@
-// Runs bench-llm-cases.json through the chat decider (classifier.llm) and compares the verdicts
+// Runs bench-llm-cases.json through the chat decider ("decider": "llm") and compares the verdicts
 // with what each case says it should be. Every case goes to the model, including the ones a rule
 // would settle, so the model's own judgment is visible; the rule verdict is printed next to it.
 // Nothing under test is executed.
@@ -7,7 +7,7 @@
 // an action against what the user asked for, so a case without a user message means nothing.
 //
 // Needs a model Pi can reach: `pi` installed and the model in its catalog. The decider is
-// configured in ~/.pi/agent/extensions/pi-automode-classifier/config.json under classifier.llm,
+// configured in ~/.pi/agent/extensions/pi-automode-classifier/config.json under `llm`,
 // or on the command line.
 //
 // Usage: node bench-llm.mjs [provider/model] [thinkingLevel|off] [single]
@@ -24,22 +24,19 @@ const { DEFAULTS, decideWithLlm, llmName, systemPrompt, loadConfig } = await imp
 const { bashVerdict, makeScope } = await import("./rules.ts");
 
 const mine = loadConfig().config;
-const llm = { ...DEFAULTS.classifier.llm, ...mine.classifier.llm, enabled: true };
+const llm = { ...mine.llm };
 const target = process.argv[2] ?? "";
 if (target) {
   const at = target.indexOf("/");
   llm.provider = at < 0 ? "" : target.slice(0, at);
-  llm.model = target.slice(at + 1);
+  llm.model = at < 0 ? target : target.slice(at + 1);
 }
-if (process.argv[3]) {
-  llm.thinkingLevel = process.argv[3] === "off" ? "" : process.argv[3];
-  llm.reasoning = llm.thinkingLevel !== "";
-}
+if (process.argv[3]) llm.thinkingLevel = process.argv[3];
 if (process.argv[4] === "single") llm.twoStage = false;
 
-const config = { ...DEFAULTS, classifier: { ...DEFAULTS.classifier, llm } };
+const config = { ...DEFAULTS, decider: "llm", llm };
 if (!llm.provider && !llm.model) {
-  console.error("no decider model: set classifier.llm in the config or pass provider/model");
+  console.error("no decider model: set llm.provider and llm.model in the config or pass provider/model");
   process.exit(1);
 }
 
@@ -54,7 +51,7 @@ const cwd = path.join(os.homedir(), "project");
 const cases = JSON.parse(fs.readFileSync(path.join(here, "bench-llm-cases.json"), "utf8")).cases;
 const guard = here;
 
-console.log(`decider ${llmName(llm)}, ${llm.twoStage ? "two-stage" : "one stage"}, thinking ${llm.reasoning ? llm.thinkingLevel || "off" : "off"}, prompt ${systemPrompt(config).length} chars`);
+console.log(`decider ${llmName(llm)}, ${llm.twoStage ? "two-stage" : "one stage"}, thinking ${llm.thinkingLevel}, prompt ${systemPrompt(config).length} chars`);
 const rows = [];
 for (const c of cases) {
   const prior = (c.prior ?? []).map((p) => ({ kind: "tool", tool: p.tool, input: p.input }));

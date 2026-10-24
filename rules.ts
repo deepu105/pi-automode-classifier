@@ -6,7 +6,8 @@
 //              guard's own files)
 //   allow    - read-only commands, builds and tests, file changes inside the working directory,
 //              running a file of the project or one the agent wrote in this session
-//   classify - everything else goes to the decision model
+//   classify - everything else goes to the decider
+// With the chat decider, asks go to it as well, except the firm and locked ones (forDecider).
 //
 // A compound command gets the most severe verdict of its parts. Command substitutions and
 // `sh -c` strings are parsed as commands too. Syntax the parser does not model (unbalanced
@@ -29,12 +30,20 @@ export interface Verdict {
   reason: string;
   // A user allow rule cannot replace this verdict.
   locked?: boolean;
+  // An ask that stays an ask with the chat decider: your own ask rules and the critical asks.
+  // Every other ask goes to the decider instead.
+  firm?: boolean;
+  // Root, credential reads and running downloaded code: a firm ask that is also blocked without
+  // a UI, whatever `withoutUi.onAsk` says. A user rule for the command still replaces it.
+  critical?: boolean;
   // Set when the call asks because it changes something outside the working directory: the
   // folder a "for this session" permission would cover.
   dir?: string;
-  // Set when one command the rules do not know sent the call to the model: an allow pattern
-  // for it that the confirm prompt can offer.
+  // Set when one command decides the verdict: an allow pattern for it that the confirm prompt
+  // can offer for the session.
   pattern?: string;
+  // The pattern came from an ask, so it is offered for the session only, never saved.
+  fromAsk?: boolean;
   // Set on a classify verdict that runs files the session wrote: their paths, so the decider can
   // be given what runs.
   files?: string[];
@@ -43,7 +52,8 @@ export interface Verdict {
 const HOME = os.homedir();
 const RANK: Record<Action, number> = { allow: 0, classify: 1, ask: 2, deny: 3 };
 function worst(...verdicts: Verdict[]): Verdict {
-  const w = verdicts.reduce((a, b) => (RANK[b.action] > RANK[a.action] || (RANK[b.action] === RANK[a.action] && b.locked && !a.locked) ? b : a));
+  const hold = (v: Verdict) => (v.locked ? 3 : v.critical ? 2 : v.firm ? 1 : 0);
+  const w = verdicts.reduce((a, b) => (RANK[b.action] > RANK[a.action] || (RANK[b.action] === RANK[a.action] && hold(b) > hold(a)) ? b : a));
   // Files that run go to the decider whichever part of the command runs them.
   const files = verdicts.flatMap((v) => v.files ?? []);
   return files.length && w.action === "classify" ? { ...w, files: [...new Set(files)] } : w;
@@ -53,6 +63,10 @@ const classify = (reason: string): Verdict => ({ action: "classify", reason });
 const ask = (reason: string): Verdict => ({ action: "ask", reason });
 const deny = (reason: string): Verdict => ({ action: "deny", reason });
 const guardAsk = (reason: string): Verdict => ({ action: "ask", reason, locked: true });
+const criticalAsk = (reason: string): Verdict => ({ action: "ask", reason, firm: true, critical: true });
+// With the chat decider, Claude Code's split: the rules allow what is plainly routine and block
+// what is plainly destructive, and the decider judges the rest instead of you being asked.
+const forDecider = (v: Verdict, scope: Scope): Verdict => (scope.chatDecider && v.action === "ask" && !v.locked && !v.firm ? { ...v, action: "classify" } : v);
 
 // ---- paths ----
 
@@ -73,7 +87,7 @@ function realish(p: string): string {
   }
 }
 
-function within(p: string, dir: string, strict = false): boolean {
+export function within(p: string, dir: string, strict = false): boolean {
   const rel = path.relative(dir, p);
   if (rel === "") return !strict;
   return rel !== ".." && !rel.startsWith(".." + path.sep) && !path.isAbsolute(rel);
@@ -97,6 +111,9 @@ export interface Scope {
   // Extra directories where file changes are allowed, like the project root.
   allowed: string[];
   rules?: UserRules;
+  // Patterns allowed for the session in a prompt. Unlike your own rules they never replace a
+  // firm ask: root, a credential read or downloaded code still asks.
+  picked?: Matcher[];
   // Files written by earlier calls of the session.
   files: SessionFiles;
   // Files the call being checked would write. commitWrites() adds them to `files` once the
@@ -105,9 +122,10 @@ export interface Scope {
   // True for a file of the project checkout: tracked or ignored by the session's git repository.
   project?: (p: string) => boolean;
   // With the chat decider, running a file the session wrote or edited goes to it instead of being
-  // allowed. Otherwise writing code to a file and running it would skip the decider. A curl that
-  // sends data only to this machine goes to it instead of asking.
+  // allowed. Otherwise writing code to a file and running it would skip the decider.
   chatDecider?: boolean;
+  // Shell variables the command set to a known path before this point.
+  vars?: Map<string, string>;
 }
 
 const expandHome = (p: string) => (p === "~" || p.startsWith("~/") ? HOME + p.slice(1) : p);
@@ -116,6 +134,7 @@ const withTargets = (paths: string[]) => [...new Set(paths.map(expandHome).flatM
 export interface ScopeOptions {
   allowedPaths?: string[];
   rules?: UserRules;
+  picked?: Matcher[];
   files?: SessionFiles;
   project?: (p: string) => boolean;
   chatDecider?: boolean;
@@ -129,6 +148,7 @@ export function makeScope(cwd: string, guarded: string[], options: ScopeOptions 
     guarded: withTargets(guarded),
     allowed: withTargets(options.allowedPaths ?? []),
     rules: options.rules,
+    picked: options.picked,
     files: options.files ?? new Map(),
     pending: new Map(),
     project: options.project,
@@ -177,15 +197,22 @@ function userVerdict(argv: string[], rules: UserRules): Verdict | undefined {
   const bare = unwrap(argv).join(" ");
   for (const action of ["deny", "ask", "classify"] as const) {
     const hit = rules[action].find((m) => m.test(raw) || m.test(bare));
-    if (hit) return { action, reason: `your ${action} rule "${hit.source}"` };
+    if (hit) return { action, reason: `your ${action} rule "${hit.source}"`, ...(action === "ask" && { firm: true }) };
   }
+  return allowedBy(argv, rules.allow) ? ALLOW : undefined;
+}
+
+function allowedBy(argv: string[], allow: Matcher[]): boolean {
+  const raw = argv.join(" ");
   const plain = unwrap(argv, SAME_PROGRAM_WRAPPERS).join(" ");
-  return rules.allow.some((m) => m.test(raw) || (plain !== "" && m.test(plain))) ? ALLOW : undefined;
+  return allow.some((m) => m.test(raw) || (plain !== "" && m.test(plain)));
 }
 
 // Absolute path for a shell word, or undefined when it cannot be known (variable, ~user,
 // relative path after an unknown cd).
+const expandVars = (word: string, scope: Scope) => word.replace(/\$\{(\w+)\}|\$(\w+)/g, (m, a, b) => ((a ?? b) === "PWD" ? scope.cwd : scope.vars?.get(a ?? b)) ?? m);
 function resolveWord(word: string, scope: Scope): string | undefined {
+  word = expandVars(word, scope);
   if (/[$`]/.test(word)) return undefined;
   if (word === "~" || word.startsWith("~/")) word = HOME + word.slice(1);
   else if (word.startsWith("~")) return undefined;
@@ -217,6 +244,8 @@ function folderFor(p: string | undefined): string | undefined {
   return isRootLike(parent) ? undefined : parent;
 }
 // An ask for a change outside the working directory, with the folder it could be allowed for.
+// The `dir` key is there even when no folder can be offered: such an ask is about a path, so it
+// never gets a command pattern.
 const outside = (reason: string, p: string | undefined): Verdict => ({ action: "ask", reason, dir: folderFor(p) });
 
 // ---- files of the session ----
@@ -242,7 +271,7 @@ function runFile(word: string, args: string[], scope: Scope): Verdict | undefine
   const p = resolveWord(word, scope);
   if (!p) return undefined;
   const origin = originOf(p, scope);
-  if (origin === "fetched") return ask(`runs a file downloaded in this session: ${word}`);
+  if (origin === "fetched") return criticalAsk(`runs a file downloaded in this session: ${word}`);
   if (isGuarded(p, scope) || !isLocal(p, scope) || OUTWARD_WORDS.test([path.basename(word), ...args].join(" "))) return undefined;
   if (origin === "authored") {
     if (!scope.chatDecider) return ALLOW;
@@ -331,12 +360,15 @@ export interface Simple {
   heredoc?: boolean;
   // The heredoc body holds a variable or a command substitution, so it is not literal text.
   expands?: boolean;
+  // Runs in a subshell: inside a command substitution, or as part of a pipeline or a background
+  // job. A `cd` or an assignment there does not reach the commands that follow.
+  subshell?: boolean;
 }
 export interface Parsed {
   cmds: Simple[];
   // Syntax that is not modelled: never allow by rule.
   opaque: boolean;
-  // Subshells or substitutions: `cd` tracking is unreliable.
+  // Parenthesised subshells: `cd` tracking is unreliable.
   grouped: boolean;
 }
 
@@ -383,9 +415,9 @@ export function parse(command: string, depth = 0): Parsed {
   // Parses a substitution body as extra commands.
   const absorb = (inner: string) => {
     const sub = parse(inner, depth + 1);
+    for (const c of sub.cmds) c.subshell = true;
     result.cmds.push(...sub.cmds);
     result.opaque ||= sub.opaque;
-    result.grouped = true;
   };
   // The same, and leaves a placeholder in the word.
   const nested = (inner: string) => {
@@ -494,8 +526,12 @@ export function parse(command: string, depth = 0): Parsed {
         i = end ? i + end.index + end[0].length : s.length;
       }
     } else if (c === "&" || c === "|") {
+      // `|`, `|&` and a single `&` fork: both sides of a pipe, and the background job.
+      const forks = next !== c;
+      if (forks) cur.subshell = true;
       if (next === c || (c === "|" && next === "&")) i++;
       pushCmd();
+      if (forks && c === "|") cur.subshell = true;
     } else if (c === "(" || c === ")") {
       result.grouped = true;
       pushCmd();
@@ -746,15 +782,6 @@ function subcommand(tool: string, args: string[]): Verdict {
 }
 
 function network(cmd: string, args: string[], scope: Scope): Verdict {
-  const sent = sends(cmd, args);
-  if (!sent) return saves(cmd, args, scope);
-  // A server on this machine can still pass the data on, so the request is not allowed outright:
-  // the chat decider judges it from the whole command.
-  if (scope.chatDecider && cmd === "curl" && loopbackOnly(args)) return worst(classify("curl sends data to a server on this machine"), saves(cmd, args, scope));
-  return sent;
-}
-
-function sends(cmd: string, args: string[]): Verdict | undefined {
   if (cmd === "curl") {
     if (args.some((a) => /^(-d|--data|--data-\w+|--json|-F|--form|--form-string|-T|--upload-file)(=|$)/.test(a) || /^-[a-zA-Z]*[dFT]/.test(a))) {
       return ask("curl sends data to a remote host");
@@ -767,66 +794,68 @@ function sends(cmd: string, args: string[]): Verdict | undefined {
   }
   // A URL or header built from a variable or a substitution can carry local data out.
   if (args.some((a) => /[$`]/.test(a))) return ask(`${cmd} request built from local data`);
-  return undefined;
-}
-
-// The port may be a variable: with the host and the `:` fixed, it cannot point the request elsewhere.
-const LOOPBACK_URL = /^(https?:\/\/)?(localhost|127(\.\d{1,3}){3}|\[::1\])(:(\d+|\$\w+|\$\{\w+\}))?([/?#]\S*)?$/i;
-const CURL_SHORT_VALUE = new Set("dFTHowmXAebcuYyCErzDUQtP");
-const CURL_LONG_VALUE = new Set(
-  "--data --data-raw --data-binary --data-urlencode --data-ascii --json --form --form-string --upload-file --header --output --write-out --max-time --connect-timeout --request --user-agent --referer --cookie --cookie-jar --user --retry --retry-delay --retry-max-time --dump-header --range --continue-at --cert --key --cacert --capath --limit-rate --oauth2-bearer --url-query --unix-socket".split(" "),
-);
-
-// True when every URL of a curl command is on this machine. A proxy, a resolve override or a
-// config file can send a loopback URL elsewhere, so they never count as local. A word after an
-// option this does not know is taken as a URL, so an unknown option makes it false, not true.
-function loopbackOnly(args: string[]): boolean {
-  let urls = 0;
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    let url: string | undefined;
-    if (/^--(proxy|preproxy|socks\w*|resolve|connect-to|config)(=|$)/.test(a)) return false;
-    if (/^--(url|expand-url)=/.test(a)) url = a.slice(a.indexOf("=") + 1);
-    else if (a === "--url" || a === "--expand-url") url = args[++i];
-    else if (a.startsWith("--")) {
-      if (CURL_LONG_VALUE.has(a)) i++;
-      continue;
-    } else if (/^-./.test(a)) {
-      for (let j = 1; j < a.length; j++) {
-        if (a[j] === "x" || a[j] === "K") return false;
-        if (CURL_SHORT_VALUE.has(a[j])) {
-          if (j === a.length - 1) i++;
-          break;
-        }
-      }
-      continue;
-    } else url = a;
-    if (!LOOPBACK_URL.test(url ?? "")) return false;
-    urls++;
+  const curl = cmd === "curl";
+  const opts = optionValues(args, curl ? "AbcCdDeEFHKmoPQrtTuUwxXyYz" : "aABDeiIlOoPQRtTUwX", [...DOWNLOAD_FILES[cmd].other, ...DOWNLOAD_FILES[cmd].saved, DOWNLOAD_FILES[cmd].dir].flat());
+  const values = (flags: string[]) => opts.filter(([flag]) => flags.includes(flag)).map(([, value]) => value ?? "");
+  const writes = (file: string) => {
+    const p = resolveWord(file, scope);
+    if (file === "-" || (p && DEV_SINKS.test(p))) return { p: undefined };
+    return isLocal(p, scope) ? { p } : { p, outside: outside(`${cmd} writes outside the working directory: ${file}`, p) };
+  };
+  for (const file of values(DOWNLOAD_FILES[cmd].other)) {
+    const w = writes(file);
+    if (w.outside) return w.outside;
   }
-  return urls > 0;
-}
-
-// The files a curl or wget command saves.
-function saves(cmd: string, args: string[], scope: Scope): Verdict {
-  const outFlags = cmd === "curl" ? ["-o", "--output"] : ["-O", "--output-document"];
-  const o = args.findIndex((a) => outFlags.includes(a));
-  if (o >= 0 && args[o + 1] !== "-") {
-    const p = resolveWord(args[o + 1] ?? "", scope);
-    if (!(p && DEV_SINKS.test(p))) {
-      if (!isLocal(p, scope)) return outside(`${cmd} writes outside the working directory: ${args[o + 1] ?? ""}`, p);
-      note(p, "fetched", scope);
-    }
+  const saved = values(DOWNLOAD_FILES[cmd].saved);
+  for (const file of saved) {
+    const w = writes(file);
+    if (w.outside) return w.outside;
+    if (w.p) note(w.p, "fetched", scope);
   }
-  // wget, and curl -O, save into the current directory under the URL's file name.
-  const savesToCwd = cmd === "wget" ? o < 0 : args.some((a) => a === "--remote-name" || /^-[a-zA-Z]*O/.test(a));
-  if (!savesToCwd) return ALLOW;
-  if (!isLocal(scope.cwd, scope)) return ask(`${cmd} writes outside the working directory`);
+  // wget, and curl -O, save under the URL's file name, in the current directory or the one
+  // named by --output-dir (curl) or -P (wget).
+  const remoteName = curl ? opts.some(([flag]) => ["-O", "--remote-name", "--remote-name-all"].includes(flag)) : !saved.length;
+  if (!remoteName) return ALLOW;
+  const named = values(DOWNLOAD_FILES[cmd].dir).at(-1);
+  const dir = named === undefined ? scope.cwd : resolveWord(named, scope);
+  if (!isLocal(dir, scope)) return outside(`${cmd} writes outside the working directory${named ? `: ${named}` : ""}`, dir);
   for (const url of args.filter((a) => /^https?:\/\//.test(a))) {
     const file = path.basename(url.split(/[?#]/)[0]);
-    if (file && scope.cwd) note(path.join(scope.cwd, file), "fetched", scope);
+    if (file && dir) note(path.join(dir, file), "fetched", scope);
   }
   return ALLOW;
+}
+
+// The options of curl and wget that name a file they write: the download itself (`saved`), other
+// files such as a cookie jar or a log (`other`), and the directory a remote name is saved in.
+const DOWNLOAD_FILES: Record<string, { saved: string[]; other: string[]; dir: string[] }> = {
+  curl: { saved: ["-o", "--output"], other: ["-c", "--cookie-jar", "-D", "--dump-header", "--trace", "--trace-ascii", "--stderr"], dir: ["--output-dir"] },
+  wget: { saved: ["-O", "--output-document"], other: ["-o", "--output-file", "-a", "--append-output"], dir: ["-P", "--directory-prefix"] },
+};
+
+// Options with their values. `valued` holds the short options that take one, so a cluster like
+// `-fsSLo file`, `-ofile` or `-qO-` reads right; `long` the long options whose value may be the
+// next word.
+function optionValues(args: string[], valued: string, long: string[]): [string, string | undefined][] {
+  const out: [string, string | undefined][] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--") break;
+    if (a.startsWith("--")) {
+      const eq = a.indexOf("=");
+      out.push(eq > 0 ? [a.slice(0, eq), a.slice(eq + 1)] : [a, long.includes(a) ? args[++i] : undefined]);
+    } else if (a.length > 1 && a.startsWith("-")) {
+      for (let j = 1; j < a.length; j++) {
+        if (!valued.includes(a[j])) {
+          out.push([`-${a[j]}`, undefined]);
+          continue;
+        }
+        out.push([`-${a[j]}`, j + 1 < a.length ? a.slice(j + 1) : args[++i]]);
+        break;
+      }
+    }
+  }
+  return out;
 }
 
 function find(args: string[], scope: Scope): Verdict {
@@ -835,7 +864,8 @@ function find(args: string[], scope: Scope): Verdict {
   const acts = args.some((a) => /^-(delete|exec|execdir|ok|okdir|fprint|fprintf|fls)$/.test(a));
   if (!acts) return ALLOW;
   for (const r of roots.length ? roots : ["."]) {
-    if (!isLocal(resolveWord(r, scope), scope)) return ask(`find deletes or runs commands outside the working directory: ${r}`);
+    const p = resolveWord(r, scope);
+    if (!isLocal(p, scope)) return outside(`find deletes or runs commands outside the working directory: ${r}`, p);
   }
   const exec = args.findIndex((a) => /^-(exec|execdir|ok|okdir)$/.test(a));
   if (exec < 0) return classify("find -delete");
@@ -895,9 +925,17 @@ function redirects(cmd: Simple, scope: Scope): Verdict {
 function simple(cmd: Simple, scope: Scope, depth = 0): Verdict {
   const out = redirects(cmd, scope);
   if (out.action === "deny") return out;
-  const builtin = command(cmd, scope, depth);
-  if (builtin.action === "deny" || builtin.locked || !scope.rules) return worst(out, builtin);
-  return worst(out, userVerdict(cmd.argv, scope.rules) ?? builtin);
+  let builtin = command(cmd, scope, depth);
+  // An ask the user can allow for the session as a pattern, so the next call like it does not ask.
+  if (builtin.action === "ask" && !builtin.locked && !builtin.firm && !builtin.pattern && !("dir" in builtin)) {
+    const pattern = askPattern(unwrap(cmd.argv));
+    if (pattern) builtin = { ...builtin, pattern, fromAsk: true };
+  }
+  if (builtin.action === "deny" || builtin.locked) return worst(out, builtin);
+  const mine = scope.rules && userVerdict(cmd.argv, scope.rules);
+  if (mine) return worst(out, mine);
+  if (scope.picked && !builtin.firm && allowedBy(cmd.argv, scope.picked)) return worst(out, ALLOW);
+  return worst(out, builtin);
 }
 
 function command(cmd: Simple, scope: Scope, depth: number): Verdict {
@@ -916,13 +954,13 @@ function command(cmd: Simple, scope: Scope, depth: number): Verdict {
     verdict = worst(verdict, guardAsk(`${name} touches the auto-mode guard's own files`));
   }
   const secret = credentialRead(name, args, cmd, scope);
-  if (secret) verdict = worst(verdict, ask(`${name} reads a credential file: ${secret}`));
+  if (secret) verdict = worst(verdict, criticalAsk(`${name} reads a credential file: ${secret}`));
 
   if (name === "sudo" || name === "doas") {
     const inner = afterFlags(args, /^-[ugCDhpRrTU]$/);
-    return worst(verdict, ask(`${name} runs as root`), inner.length ? simple({ argv: inner, out: [] }, scope, depth + 1) : ALLOW);
+    return worst(verdict, criticalAsk(`${name} runs as root`), inner.length ? simple({ argv: inner, out: [] }, scope, depth + 1) : ALLOW);
   }
-  if (ALWAYS_ASK[name]) return worst(verdict, ask(`${name} ${ALWAYS_ASK[name]}`));
+  if (ALWAYS_ASK[name]) return worst(verdict, (name === "su" || name === "pkexec" ? criticalAsk : ask)(`${name} ${ALWAYS_ASK[name]}`));
   if (args.length === 1 && /^(--version|-V|--help|-h)$/.test(args[0])) return verdict;
 
   if (SHELLS.has(name)) {
@@ -1007,6 +1045,19 @@ function command(cmd: Simple, scope: Scope, depth: number): Verdict {
 // The allow pattern a confirm prompt offers for a command the rules do not know: the command
 // and its subcommand or first flag, such as `terraform plan *`. None for a program named by
 // path, whose name says nothing about what it is.
+// For an ask: the subcommand, plus the word that says what changes for `gh pr edit *`,
+// `git config --global *` and `git remote add *`. None when the first word is a flag or an
+// operand, for root, for `gh api`, and for programs whose arguments are what they send: the
+// pattern would cover the next call's flags and files too, such as `curl -sS -d @.env`.
+const NO_ASK_PATTERN = new Set(["sudo", "doas", "curl", "wget", "scp", "rsync", "sftp", "ftp", "nc", "ncat", "netcat", "socat", "ssh", "telnet", "http", "https", "xh", "rclone"]);
+function askPattern(argv: string[]): string | undefined {
+  const [program, sub = "", next = ""] = argv;
+  if (!/^[\w.+-]+$/.test(program ?? "") || NO_ASK_PATTERN.has(program) || !/^[a-z][\w-]*$/.test(sub)) return undefined;
+  if (program === "gh" && sub === "api") return undefined;
+  const third = program === "gh" ? /^[a-z][\w-]*$/.test(next) : program === "git" && ["config", "remote"].includes(sub) && /^(--)?[a-z][\w-]*$/.test(next);
+  return `${program} ${sub}${third ? ` ${next}` : ""} *`;
+}
+
 function allowPattern(argv: string[]): string | undefined {
   if (!/^[\w.+-]+$/.test(argv[0])) return undefined;
   const first = argv[1] !== undefined && /^(-{1,2})?[A-Za-z][\w-]*$/.test(argv[1]) ? ` ${argv[1]}` : "";
@@ -1020,22 +1071,43 @@ const FORK_BOMB = /:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/;
 // `curl ... | python3 -c "..."` is not one: the download is the program's input.
 const PIPE_TO_SHELL = /\b(curl|wget)\b[^|;&\n]*\|\s*(sudo\s+)?(env\s+)?(ba|z|da|k)?sh\b|\b(curl|wget)\b[^|;&\n]*\|\s*(python3?|node|perl|ruby)\s*(-\s*)?($|[|;&\n)])/;
 
+// `NAME=value` words of a command that only sets variables (or exports them).
+function assignments(argv: string[]): [string, string][] | undefined {
+  const words = argv[0] === "export" ? argv.slice(1) : argv;
+  const pairs = words.map((w) => /^([A-Za-z_]\w*)=(.*)$/s.exec(w));
+  return words.length && pairs.every(Boolean) ? pairs.map((m) => [m![1], m![2]]) : undefined;
+}
+
 function evaluateParsed(parsed: Parsed, scope: Scope, depth: number): Verdict {
   let verdict: Verdict = parsed.opaque ? classify("shell syntax the rules do not model") : ALLOW;
   // Relative paths are only trusted while the working directory is known.
-  const local: Scope = { ...scope };
+  const local: Scope = { ...scope, vars: new Map() };
   const hasCd = parsed.cmds.some((c) => ["cd", "pushd", "popd"].includes(c.argv[0]));
   if (hasCd && parsed.grouped) local.cwd = undefined;
-  // The patterns of the parts left to the model. A prompt offers one only when it covers them all.
+  // A variable is followed only when the command names it once, in the assignment, and at the
+  // top level: a branch, a loop, `read` or a second assignment could give it another value. A
+  // nested shell does not see unexported variables, so it starts with none.
+  const words = parsed.cmds.flatMap((c) => [...c.argv, ...c.out, ...(c.in ?? [])]).join(" ");
+  const namedOnce = (name: string) => (words.match(new RegExp(`(^|[^$\\w{])${name}(?!\\w)`, "g")) ?? []).length === 1;
+  const track = depth === 0 && !parsed.grouped;
+  // The patterns of the parts that decide. A prompt offers one only when it covers them all.
   const patterns = new Set<string | undefined>(parsed.opaque ? [undefined] : []);
   for (const cmd of parsed.cmds) {
     const part = simple(cmd, local, depth);
-    if (part.action === "classify") patterns.add(part.pattern);
+    if (part.action === "classify" || part.action === "ask") patterns.add(part.pattern);
     verdict = worst(verdict, part);
     if (verdict.action === "deny") return verdict;
-    if (cmd.argv[0] === "cd" && local.cwd) {
+    if (cmd.subshell) {
+      if (["cd", "pushd", "popd"].includes(cmd.argv[0])) local.cwd = undefined;
+    } else if (cmd.argv[0] === "cd" && local.cwd) {
       local.cwd = cmd.argv.length === 2 ? resolveWord(cmd.argv[1], local) : cmd.argv.length === 1 ? HOME : undefined;
     } else if (cmd.argv[0] === "pushd" || cmd.argv[0] === "popd") local.cwd = undefined;
+    for (const [name, value] of (track && !cmd.subshell && assignments(cmd.argv)) || []) {
+      // A relative value is resolved where it is used, after any later `cd`, so only absolute
+      // ones are followed.
+      const p = /^(\/|~\/|~$)/.test(expandVars(value, local)) ? resolveWord(value, local) : undefined;
+      if (p && namedOnce(name)) local.vars!.set(name, p);
+    }
   }
   return verdict.pattern && patterns.size > 1 ? { ...verdict, pattern: undefined } : verdict;
 }
@@ -1044,7 +1116,7 @@ export function bashVerdict(command: string, scope: Scope): Verdict {
   if (FORK_BOMB.test(command)) return deny("fork bomb");
   const verdict = evaluateParsed(parse(command), scope, 0);
   if (verdict.action === "deny") return verdict;
-  return PIPE_TO_SHELL.test(command) ? worst(verdict, ask("downloads code and runs it")) : verdict;
+  return forDecider(PIPE_TO_SHELL.test(command) ? worst(verdict, criticalAsk("downloads code and runs it")) : verdict, scope);
 }
 
 // write and edit tools.
@@ -1055,11 +1127,11 @@ export function fileVerdict(tool: string, target: string, scope: Scope): Verdict
   // For the chat decider an edit makes a file of no known origin one the session wrote, so a
   // project script the agent changed goes to it when run.
   if (tool === "write" || (scope.chatDecider && p && originOf(p, scope) === undefined)) note(p, "authored", scope);
-  return isLocal(p, scope) ? ALLOW : outside(`${tool} outside the working directory: ${target}`, p);
+  return isLocal(p, scope) ? ALLOW : forDecider(outside(`${tool} outside the working directory: ${target}`, p), scope);
 }
 
 // read and grep tools: an ask for a credential file, undefined for every other path.
 export function readVerdict(tool: string, target: string, scope: Scope): Verdict | undefined {
   const secret = secretIn(target.startsWith("@") ? target.slice(1) : target, scope, true);
-  return secret ? ask(`${tool} of a credential file: ${target}`) : undefined;
+  return secret ? criticalAsk(`${tool} of a credential file: ${target}`) : undefined;
 }
