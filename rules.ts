@@ -758,11 +758,17 @@ function git(args: string[], scope: Scope): Verdict {
   const sub = args[i];
   const rest = args.slice(i + 1);
   const has = (...flags: string[]) => rest.some((a) => flags.includes(a));
+  // A long flag, or its letter alone or in a cluster such as `-SW`.
+  const flag = (long: string, letter: string) => has(long) || rest.some((a) => new RegExp(`^-[a-zA-Z]*${letter}[a-zA-Z]*$`).test(a));
   if (!sub) return ALLOW;
   if (sub === "reset" && has("--hard")) return ask("git reset --hard discards local changes");
   if (sub === "clean" && rest.some((a) => /^-[a-zA-Z]*f/.test(a) || a === "--force")) return ask("git clean -f deletes untracked files");
   if (sub === "checkout" && (has("--", ".") || has("-f", "--force"))) return ask("git checkout discards local changes");
-  if (sub === "restore" && !has("--staged", "-S")) return ask("git restore discards local changes");
+  // Only --staged alone keeps the working tree; --worktree with it still discards changes.
+  if (sub === "restore" && (!flag("--staged", "S") || flag("--worktree", "W"))) return ask("git restore discards local changes");
+  // Without --force git refuses to remove a worktree or submodule that has local changes.
+  if (sub === "worktree" && operands(rest)[0] === "remove" && flag("--force", "f")) return ask("git worktree remove --force deletes the worktree with its uncommitted changes");
+  if (sub === "submodule" && operands(rest)[0] === "deinit" && flag("--force", "f")) return ask("git submodule deinit --force deletes submodule working trees with their local changes");
   if (sub === "branch") return has("-D") || (has("-d", "--delete") && has("-f", "--force")) ? ask("git branch -D deletes a branch") : ALLOW;
   if (sub === "stash") return has("drop", "clear") ? ask("git stash drop deletes stashed changes") : ALLOW;
   if (sub === "tag") return has("-d", "--delete") ? ask("git tag -d deletes a tag") : ALLOW;

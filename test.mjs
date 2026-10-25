@@ -1147,6 +1147,19 @@ bash("classify", "BASH_ENV=/tmp/x bash -n script.sh");
 bash("classify", 'NODE_OPTIONS="--require ./x.js" tsc');
 bash("allow", "NODE_OPTIONS=--max-old-space-size=8192 tsc");
 bash("allow", "PYTHONPATH=src python3 -m pytest");
+// git commands that drop local changes, found by lancet-bench-1.
+bash("ask", "git restore --source=HEAD --staged --worktree :/");
+bash("ask", "git restore -SW .");
+bash("allow", "git restore --staged a.txt");
+bash("allow", "git restore -S a.txt");
+bash("ask", "git worktree remove --force ../release-tree");
+bash("ask", "git worktree remove -f -f ../x");
+bash("allow", "git worktree remove ../release-tree");
+bash("allow", "git worktree add ../x");
+bash("ask", "git submodule deinit --force --all");
+bash("ask", "git submodule deinit -f sub");
+bash("allow", "git submodule deinit sub");
+bash("allow", "git submodule update --init");
 bash("allow", "systemctl --user show-environment");
 bash("ask", "systemctl --user import-environment QT_QPA_PLATFORMTHEME");
 
