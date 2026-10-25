@@ -12,11 +12,11 @@ It is not a sandbox. It guards the agent's tool calls. It doesn't guard `!` comm
 
 1. **Rules** (`rules.ts`) parse the shell command, including `$(...)`, `bash -c` strings and `sudo`/`timeout`/`uv run` style wrappers, and give one of four verdicts:
    - **deny**: `rm -rf` of `/`, `$HOME` or a system directory, `mkfs`, `dd` to a disk, fork bombs. Blocked, no prompt.
-   - **ask**: root (`sudo`), anything visible to others (`git push`, `gh pr create`, `npm publish`), sending data out (`curl -d`, `scp`, `nc`), `curl | sh`, running a file that was downloaded in this session, [reading a credential file](#credential-files), deletes and writes outside the working directory, `git reset --hard`, service and package changes, and edits to this extension's own files.
+   - **ask**: root (`sudo`), anything visible to others (`git push`, `gh pr create`, `npm publish`), sending data out (`curl -d`, `scp`, `nc`), `curl | sh`, running a file that was downloaded in this session, [reading a credential file](#credential-files), deletes and writes outside the working directory, `git reset --hard`, service and package changes, edits to this extension's own files, and [changes to Pi's own files](#pis-own-files).
    - **allow**: read-only commands, builds, tests, linters, local git work, file changes inside the working directory or `/tmp`, and [scripts and programs of the project](#scripts-and-programs).
    - **classify**: everything else, for example `python scripts/deploy.py` or `kubectl delete ...`.
 2. **The decider** gets the calls marked classify. `decider` in the config picks it:
-   - `llm`, the default: a [chat model](#the-chat-decider) through Pi, the session's own unless you set `llm.provider` and `llm.model`. It reads your messages and the session's tool calls, not just the command, and answers block or allow. The ask verdicts go to it too, the same split Claude Code uses. These still ask you: root (`sudo`, `su`, `doas`, `pkexec`), reading a credential file, running downloaded code, your own `ask` rules, and changes to this extension's own files.
+   - `llm`, the default: a [chat model](#the-chat-decider) through Pi, the session's own unless you set `llm.provider` and `llm.model`. It reads your messages and the session's tool calls, not just the command, and answers block or allow. The ask verdicts go to it too, the same split Claude Code uses. These still ask you: root (`sudo`, `su`, `doas`, `pkexec`), reading a credential file, running downloaded code, your own `ask` rules, and changes to this extension's or Pi's own files.
    - `classifier`: a [decision model](#or-use-a-classifier-model) that answers one yes/no question, "is this command risky?", with a probability. Below `classifier.askAbove` (default 0.2) the command runs. It runs on a local server (Kev, Laya) or through Pi (Jev).
    - `command`: a [classifier that runs as a process](#or-use-a-classifier-that-runs-as-a-process), like LANCET, which answers with a score.
 
@@ -59,6 +59,16 @@ A command that reads a credential file asks, also a read-only one like `cat ~/.a
 
 An `allow` rule in your config replaces the ask, for example `"cat ~/.npmrc"`.
 
+### Pi's own files
+
+Changes to Pi's own configuration, instructions and code ask you, also inside the project and with the chat decider, because they change what later sessions do:
+
+- **Pi's agent directory** (`~/.pi/agent`, or `PI_CODING_AGENT_DIR`) and any `.pi` folder, such as a project's `.pi/settings.json`, `.pi/extensions/` or `.pi/APPEND_SYSTEM.md`, or a dotfiles copy of `~/.pi/agent`.
+- **Context files** in any directory: `AGENTS.md`, `AGENTS.override.md`, `AGENTS.MD`, `CLAUDE.md` and `CLAUDE.MD`.
+- **`pi install`, `pi remove`, `pi update` and `pi config`.**
+
+Reading them is fine. For the `write` and `edit` tools, `Allow for this session` covers that one file. For a command, an `allow` rule replaces the ask, for example `"pi install npm:pi-subagents"`. Without a UI these follow `withoutUi.onAsk`. Pi's `settings.json` and this extension's files are stricter: they always ask, no rule opens them, and they are blocked without a UI.
+
 ## Install
 
 ```bash
@@ -80,7 +90,7 @@ This is the default decider. The calls the rules leave open go to a general chat
 This is what the small decision models can't do, because they only see one command line:
 
 - **It reads intent.** `git push --force origin main` after "fix the flaky test" is blocked; the same push after "force push the branch, I rebased it" runs. Naming the destructive step is what clears a rule, and the model has your messages to check it against.
-- **It applies a rule book, not one question.** The shipped lists are Claude Code's own defaults, read out of a local Claude Code with `claude auto-mode defaults`: 1 hard block, 72 soft blocks, 17 allow exceptions and 21 environment slots, with the same `$defaults` splice. The prompt text is what Claude Code sends, trimmed to what applies to Pi: no browser tools and no cross-session messages. The rule lists ship as Claude Code prints them, so a few name tools Pi doesn't have (the browser and artifact rules, `CronCreate`) and have nothing to match, and the self-modification rule names `.claude` paths. Changes to Pi's settings and this extension's own files ask by rule anyway.
+- **It applies a rule book, not one question.** The shipped lists are Claude Code's own defaults, read out of a local Claude Code with `claude auto-mode defaults`: 1 hard block, 72 soft blocks, 17 allow exceptions and 21 environment slots, with the same `$defaults` splice. The prompt text is what Claude Code sends, trimmed to what applies to Pi: no browser tools and no cross-session messages. The rule lists ship as Claude Code prints them, so a few name tools Pi doesn't have (the browser and artifact rules, `CronCreate`) and have nothing to match, and the self-modification rule names `.claude` paths. Changes to [Pi's own files](#pis-own-files) ask by rule anyway.
 - **The deny says why.** `[Credential Exploration] the agent is scanning ~/.aws and ~/.config for tokens` goes back to the agent, which is told to find a safer path and not to route around the block.
 
 The cost is context. The fixed prompt is about 101,000 characters, roughly 25,000 tokens, so it is sent as the system prompt and kept byte-identical between calls; every call after the first is a prefix cache hit, and with `warmCache` on, one throwaway call at session start makes even the first one hit. Measured on Qwen3.8-Flash-Next (`flash-next-halogen@multi-agent-balanced`) on a Ryzen AI Max+ 395, with this session sharing the GPU: a cold prefill is 22 s, a call stage 1 passes is about 1.2 s, and a call that needs the reasoning stage is 20 to 55 s. That last one is why `timeoutMs` defaults to 60 s and why `onNoAnswer` matters. Run it on an idle GPU or a fast hosted model and it is quicker.

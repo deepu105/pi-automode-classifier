@@ -3,7 +3,7 @@
 //   deny     - blocked outright (wipes of /, $HOME or a system directory, disk formatting)
 //   ask      - needs a confirm prompt (root, remote or outward-facing actions, deletes and
 //              writes outside the working directory, reads of credential files, edits to this
-//              guard's own files)
+//              guard's own files and to Pi's own files)
 //   allow    - read-only commands, builds and tests, file changes inside the working directory,
 //              running a file of the project or one the agent wrote in this session
 //   classify - everything else goes to the decider
@@ -108,6 +108,8 @@ export interface Scope {
   root: string | undefined;
   // This guard's own files and Pi's settings. Changes to them always ask.
   guarded: string[];
+  // Pi's agent directory. See isPiFile.
+  piDirs: string[];
   // Extra directories where file changes are allowed, like the project root.
   allowed: string[];
   rules?: UserRules;
@@ -133,6 +135,7 @@ const withTargets = (paths: string[]) => [...new Set(paths.map(expandHome).flatM
 
 export interface ScopeOptions {
   allowedPaths?: string[];
+  piDirs?: string[];
   rules?: UserRules;
   picked?: Matcher[];
   files?: SessionFiles;
@@ -146,6 +149,7 @@ export function makeScope(cwd: string, guarded: string[], options: ScopeOptions 
     cwd: real,
     root: within(HOME, real) ? undefined : real,
     guarded: withTargets(guarded),
+    piDirs: withTargets(options.piDirs ?? []),
     allowed: withTargets(options.allowedPaths ?? []),
     rules: options.rules,
     picked: options.picked,
@@ -224,6 +228,13 @@ function resolveWord(word: string, scope: Scope): string | undefined {
 }
 
 const isGuarded = (p: string | undefined, scope: Scope) => !!p && scope.guarded.some((g) => within(p, g));
+// Pi's own configuration, instructions and code: its agent directory, any `.pi` directory (a
+// project's Pi config, or a dotfiles copy of the agent directory) and the context files Pi reads
+// in every directory. A change to them changes what later sessions do, so it asks you, also with
+// the chat decider. Your own allow rules can replace that ask.
+const CONTEXT_FILES = new Set(["AGENTS.md", "AGENTS.override.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"]);
+const isPiFile = (p: string | undefined, scope: Scope) => !!p && (p.split("/").includes(".pi") || CONTEXT_FILES.has(path.basename(p)) || scope.piDirs.some((d) => within(p, d)));
+const piAsk = (reason: string): Verdict => ({ action: "ask", reason, firm: true });
 const inTmp = (p: string) => TMP_DIRS.some((d) => within(p, d, true));
 // Provably inside the project or a temp directory.
 const isLocal = (p: string | undefined, scope: Scope) =>
@@ -684,6 +695,7 @@ function writeTargets(cmd: string, args: string[], scope: Scope, literalInput = 
   for (const t of targets) {
     const p = resolveWord(t, scope);
     if (isGuarded(p, scope)) return guardAsk(`${cmd} changes the auto-mode guard's own files`);
+    if (isPiFile(p, scope)) return piAsk(`${cmd} changes Pi's own files: ${t}`);
     if (!isLocal(p, scope)) return outside(`${cmd} writes outside the working directory: ${t}`, p);
   }
   if (COPIERS.has(cmd) && paths.length > 1) {
@@ -714,6 +726,7 @@ function rm(args: string[], scope: Scope): Verdict {
       return deny(`rm -r of ${t} would wipe a home or system directory`);
     }
     if (isGuarded(p, scope)) verdict = worst(verdict, guardAsk("rm deletes the auto-mode guard's own files"));
+    else if (isPiFile(p, scope)) verdict = worst(verdict, piAsk(`rm deletes Pi's own files: ${t}`));
     else if (!isLocal(p, scope)) verdict = worst(verdict, outside(`rm deletes outside the working directory: ${t}`, p));
     else if (recursive && scope.root && (p === scope.root || (bare && path.dirname(p!) === scope.root) || /(^|\/)\.git(\/|$)/.test(p!))) {
       verdict = worst(verdict, ask(`rm -r of ${t} deletes the whole project or its git data`));
@@ -800,6 +813,7 @@ function network(cmd: string, args: string[], scope: Scope): Verdict {
   const writes = (file: string) => {
     const p = resolveWord(file, scope);
     if (file === "-" || (p && DEV_SINKS.test(p))) return { p: undefined };
+    if (isPiFile(p, scope)) return { p, outside: piAsk(`${cmd} writes Pi's own files: ${file}`) };
     return isLocal(p, scope) ? { p } : { p, outside: outside(`${cmd} writes outside the working directory: ${file}`, p) };
   };
   for (const file of values(DOWNLOAD_FILES[cmd].other)) {
@@ -818,6 +832,7 @@ function network(cmd: string, args: string[], scope: Scope): Verdict {
   if (!remoteName) return ALLOW;
   const named = values(DOWNLOAD_FILES[cmd].dir).at(-1);
   const dir = named === undefined ? scope.cwd : resolveWord(named, scope);
+  if (isPiFile(dir, scope)) return piAsk(`${cmd} writes into Pi's own files: ${named ?? dir}`);
   if (!isLocal(dir, scope)) return outside(`${cmd} writes outside the working directory${named ? `: ${named}` : ""}`, dir);
   for (const url of args.filter((a) => /^https?:\/\//.test(a))) {
     const file = path.basename(url.split(/[?#]/)[0]);
@@ -865,6 +880,7 @@ function find(args: string[], scope: Scope): Verdict {
   if (!acts) return ALLOW;
   for (const r of roots.length ? roots : ["."]) {
     const p = resolveWord(r, scope);
+    if (isPiFile(p, scope)) return piAsk(`find deletes or runs commands in Pi's own files: ${r}`);
     if (!isLocal(p, scope)) return outside(`find deletes or runs commands outside the working directory: ${r}`, p);
   }
   const exec = args.findIndex((a) => /^-(exec|execdir|ok|okdir)$/.test(a));
@@ -913,6 +929,7 @@ function redirects(cmd: Simple, scope: Scope): Verdict {
     if (p && DEV_SINKS.test(p)) continue;
     if (p && /^\/dev\//.test(p)) return deny(`writes to the device ${target}`);
     if (isGuarded(p, scope)) verdict = worst(verdict, guardAsk("redirect overwrites the auto-mode guard's own files"));
+    else if (isPiFile(p, scope)) verdict = worst(verdict, piAsk(`redirect writes Pi's own files: ${target}`));
     else if (!isLocal(p, scope)) verdict = worst(verdict, outside(`redirect writes outside the working directory: ${target}`, p));
     // Appending literal text leaves the file's origin as it was.
     if (!(origin === "authored" && cmd.append?.includes(target))) note(p, origin, scope);
@@ -955,6 +972,8 @@ function command(cmd: Simple, scope: Scope, depth: number): Verdict {
   }
   const secret = credentialRead(name, args, cmd, scope);
   if (secret) verdict = worst(verdict, criticalAsk(`${name} reads a credential file: ${secret}`));
+  // Pi's package commands change its settings and what code every session loads.
+  if (name === "pi" && ["install", "remove", "uninstall", "update", "config"].includes(args[0])) verdict = worst(verdict, piAsk(`pi ${args[0]} changes Pi's own setup`));
 
   if (name === "sudo" || name === "doas") {
     const inner = afterFlags(args, /^-[ugCDhpRrTU]$/);
@@ -989,6 +1008,7 @@ function command(cmd: Simple, scope: Scope, depth: number): Verdict {
     if (of === undefined) return worst(verdict, classify("dd"));
     const p = resolveWord(of, scope);
     if (p && /^\/dev\//.test(p) && !DEV_SINKS.test(p)) return deny(`dd writes to the device ${of}`);
+    if (isPiFile(p, scope)) return worst(verdict, piAsk(`dd writes Pi's own files: ${of}`));
     return worst(verdict, isLocal(p, scope) ? classify("dd") : outside(`dd writes outside the working directory: ${of}`, p));
   }
   if ((name === "chmod" || name === "chown" || name === "chgrp") && hasFlag(args, "R", "--recursive")) {
@@ -1123,6 +1143,7 @@ export function bashVerdict(command: string, scope: Scope): Verdict {
 export function fileVerdict(tool: string, target: string, scope: Scope): Verdict {
   const p = resolveWord(target.startsWith("@") ? target.slice(1) : target, scope);
   if (isGuarded(p, scope)) return guardAsk(`${tool} changes the auto-mode guard's own files`);
+  if (isPiFile(p, scope)) return piAsk(`${tool} changes Pi's own files: ${target}`);
   // The write tool replaces the whole file with the agent's text; an edit keeps the file's origin.
   // For the chat decider an edit makes a file of no known origin one the session wrote, so a
   // project script the agent changed goes to it when run.

@@ -42,7 +42,7 @@
 
   // A chat model, in Claude Code auto mode style. It judges with the user's messages and the
   // session's tool calls, and also gets the asks, except root, credential reads, downloaded code,
-  // your ask rules and this extension's own files.
+  // your ask rules, and changes to this extension's or Pi's own files.
   "llm": {
     // Pi provider and model id, for example "llamastash-z13" and "flash-next-128k". Both
     // empty: the session's own model.

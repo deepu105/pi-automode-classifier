@@ -1045,6 +1045,24 @@ bash("ask", "wget -qO ~/.profile https://example.com/x");
 bash("ask", "wget -P ~/elsewhere https://example.com/x.sh");
 bash("allow", "wget -qO- https://example.com/x");
 bash("allow", "curl -fsSLo target/x.tar.gz https://example.com/x.tar.gz");
+// Pi's own files ask, also inside the project and with the chat decider.
+{
+  const decider = () => makeScope(project, [guard], { chatDecider: true, piDirs: [path.join(home, ".pi-amc-agent-dir")] });
+  const pi = (want, verdict, label) => check("x", { action: verdict.action === want && (want !== "ask" || verdict.firm) ? "x" : JSON.stringify(verdict) }, `pi files: ${label}`);
+  pi("ask", fileVerdict("write", "AGENTS.md", decider()), "write AGENTS.md in the project");
+  pi("ask", fileVerdict("edit", "sub/CLAUDE.md", decider()), "edit CLAUDE.md in a subfolder");
+  pi("ask", fileVerdict("write", ".pi/extensions/x.ts", decider()), "write a project extension");
+  pi("ask", fileVerdict("write", "~/.pi-amc-agent-dir/skills/x/SKILL.md", decider()), "write into the agent directory");
+  pi("ask", bashVerdict("echo x >> AGENTS.md", decider()), "append to AGENTS.md");
+  pi("ask", bashVerdict("cp notes.md .pi/APPEND_SYSTEM.md", decider()), "copy into .pi");
+  pi("ask", bashVerdict("sed -i s/a/b/ AGENTS.md", decider()), "sed -i on AGENTS.md");
+  pi("ask", bashVerdict("rm -f CLAUDE.md", decider()), "rm CLAUDE.md");
+  pi("ask", bashVerdict("curl -fsSLo .pi/prompts/x.md https://example.com/x.md", decider()), "download into .pi");
+  pi("ask", bashVerdict("pi install npm:some-extension", decider()), "pi install");
+  pi("allow", bashVerdict("cat AGENTS.md .pi/settings.json", decider()), "reading them");
+  pi("allow", bashVerdict("pi install npm:some-extension", makeScope(project, [guard], { rules: compileRules({ allow: ["pi install npm:some-extension"] }) })), "your own allow rule replaces the ask");
+  check("x", { action: bashVerdict("pi install npm:some-extension", decider()).pattern === undefined ? "x" : "pattern" }, "pi files: no session pattern for them");
+}
 // Shell variables set to a path in the same command.
 bash("allow", "BASE=/tmp/pi-amc; mkdir -p $BASE/state && echo x > $BASE/state/a.txt");
 bash("allow", 'export S="$PWD/target/e2e"; rm -rf "$S"; mkdir -p ${S}/x');

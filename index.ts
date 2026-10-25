@@ -920,6 +920,7 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
     const scope = makeScope(ctx.cwd, guarded, {
       rules: ctx.hasUI ? rules.ui : rules.headless,
       picked: pickedRules,
+      piDirs: [AGENT_DIR],
       allowedPaths: [...allowedPaths, ...roots],
       files,
       project: (p) => inCheckout(p, roots),
