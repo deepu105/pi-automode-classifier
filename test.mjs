@@ -464,7 +464,7 @@ const pattern = (want, command) => {
   const got = bashVerdict(command, scope()).pattern;
   check("x", { action: got === want ? "x" : `pattern=${got}` }, `pattern: ${command}`);
 };
-pattern("llamastash status *", "cd src && llamastash status --json | head -5");
+pattern("mytool status *", "cd src && mytool status --json | head -5");
 pattern("claude -p *", 'timeout 240 claude -p "/review" --max-turns 1');
 pattern("kubectl get *", "kubectl get pods; kubectl get svc");
 pattern("cargo install *", "cargo install ripgrep");
@@ -1160,6 +1160,22 @@ bash("ask", "git submodule deinit --force --all");
 bash("ask", "git submodule deinit -f sub");
 bash("allow", "git submodule deinit sub");
 bash("allow", "git submodule update --init");
+// LlamaStash's CLI.
+bash("allow", "timeout 20 llamastash list --json 2>/dev/null | jq -r '.models[].name' | head -40");
+bash("allow", "llamastash status");
+bash("allow", "llamastash requests | head -5");
+bash("allow", "llamastash show Kev-0.8B-Q8_0.gguf");
+bash("allow", "llamastash presets Kev-0.8B-Q8_0.gguf list");
+bash("allow", "llamastash daemon status --json");
+bash("allow", "llamastash doctor --dry-run");
+bash("classify", "llamastash doctor --fix");
+bash("classify", "llamastash start Kev-0.8B-Q8_0.gguf --preset automode --port 11438 --wait");
+bash("classify", "llamastash presets Kev-0.8B-Q8_0.gguf delete automode");
+bash("ask", "llamastash api-key");
+bash("ask", "llamastash stop L1");
+bash("ask", "llamastash daemon restart");
+bash("ask", "llamastash integrations");
+check("x", { action: bashVerdict("llamastash api-key", scope()).critical ? "x" : "not critical" }, "llamastash api-key is a critical ask, like a credential read");
 bash("allow", "systemctl --user show-environment");
 bash("ask", "systemctl --user import-environment QT_QPA_PLATFORMTHEME");
 

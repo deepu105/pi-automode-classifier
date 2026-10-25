@@ -802,6 +802,20 @@ function gh(args: string[]): Verdict {
   return subcommand("gh", args);
 }
 
+// LlamaStash's CLI. Reads run; stopping a model can cut off other sessions that use it.
+const LLAMASTASH_READ = new Set(["list", "status", "logs", "requests", "completions", "knobs", "show", "last-params", "help"]);
+function llamastash(args: string[]): Verdict {
+  const [sub, second, third] = operands(args);
+  if (!sub || LLAMASTASH_READ.has(sub)) return ALLOW;
+  if (sub === "api-key") return criticalAsk("llamastash api-key prints the proxy's API key");
+  if (sub === "stop" || (sub === "daemon" && (second === "stop" || second === "restart"))) return ask("llamastash stops models that other sessions may be using");
+  if (sub === "integrations") return piAsk("llamastash integrations changes other tools' configs, Pi's among them");
+  if ((sub === "daemon" && second === "status") || (sub === "config" && second === "bindings") || (sub === "favorites" && second === "list")) return ALLOW;
+  if (sub === "presets" && (third === "list" || third === "show")) return ALLOW;
+  if (sub === "doctor" && !args.includes("--fix")) return ALLOW;
+  return { ...classify(`llamastash ${sub}`), pattern: `llamastash ${sub} *` };
+}
+
 function subcommand(tool: string, args: string[]): Verdict {
   const table = SUBCOMMANDS[tool];
   const sub = operands(args)[0];
@@ -1058,6 +1072,7 @@ function command(cmd: Simple, scope: Scope, depth: number): Verdict {
   if (name === "find") return worst(verdict, find(args, scope));
   if (name === "git") return worst(verdict, git(args, scope));
   if (name === "gh") return worst(verdict, gh(args));
+  if (name === "llamastash") return worst(verdict, llamastash(args));
   if (name === "crontab") return worst(verdict, args.length === 1 && args[0] === "-l" ? ALLOW : ask("crontab changes scheduled jobs"));
   if (name === "sysctl") return worst(verdict, args.some((a) => a === "-w" || a.includes("=")) ? ask("sysctl changes kernel settings") : ALLOW);
   if (name === "pacman" || name === "paru" || name === "yay") {
