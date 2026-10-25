@@ -228,7 +228,7 @@ You can keep the server running yourself, or let the extension start it with `cl
 
 #### LlamaStash
 
-[LlamaStash](https://llamastash.dev) can manage the server too, and this is what I run. Its proxy doesn't forward `/v1/systemone` to llama.cpp models, so the extension talks to the model's own port, and the port has to be pinned. LANCET can go through the proxy instead, see [Run LANCET as a server](#run-lancet-as-a-server).
+[LlamaStash](https://llamastash.dev) can manage the server too, and this is what I run. This setup has the extension talk to the model's own port, so the port has to be pinned. LANCET goes through the proxy instead, see [Run LANCET as a server](#run-lancet-as-a-server).
 
 Add a CPU-only `llama-server` and a preset for the model to `~/.config/llamastash/config.yaml`, then restart the daemon:
 
@@ -568,7 +568,7 @@ docker build -t pi-automode-lancet:0.4.3 lancet/
 
 The image downloads the v0.4.3 bundle, checks it against the release's SHA-256, and serves `GET /health` and `POST /v1/systemone`, llama.cpp's decision-model endpoint. The scores come from LANCET's own `classify.py`: on the 793 commands of lancet-bench-1, every score matched the process version exactly. On an i9-11900H a call took 17 ms at the median and 38 ms at p95 over HTTP, the container used 233 MB, and it answered 0.7 s after start.
 
-With [LlamaStash](https://github.com/llamastash/llamastash), [`lancet/lancet-serve.sh`](lancet/lancet-serve.sh) runs the container as a generic server. The entry's `routes:` key, which needs a LlamaStash build newer than 0.9.1, makes the proxy forward `/v1/systemone` to it. The proxy starts the container on the first request, which took 1.07 s, and later requests took 12 to 20 ms:
+With [LlamaStash](https://github.com/llamastash/llamastash), [`lancet/lancet-serve.sh`](lancet/lancet-serve.sh) runs the container as a generic server, and the proxy forwards `/v1/systemone` to it. The proxy starts the container on the first request, which took 1.07 s, and later requests took 12 to 20 ms:
 
 ```yaml
 backend:
@@ -578,7 +578,6 @@ backend:
         binary: /path/to/pi-automode-classifier/lancet/lancet-serve.sh
         args: ["{port}"]
         ready: /health
-        routes: [/v1/systemone]
         memory_gib: 0.5
         stop_grace_secs: 10
 ```
