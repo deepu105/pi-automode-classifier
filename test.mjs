@@ -270,26 +270,32 @@ loads("withoutUi typo", { withoutUi: { onAsk: "pass" } }, true);
 loads("extra question named risky", { classifier: { extraQuestions: { risky: "x" } } }, true);
 loads("extra question with yes but no `no`", { classifier: { extraQuestions: { prod: { question: "x", yes: "y" } } } }, true);
 loads("not JSON", "{ nope", true);
-loads("decider command with no argv", { decider: "command" }, true);
-loads("decider none is not for the file", { decider: "none" }, true);
+loads("decider command with no argv", { decider: ["command"] }, true);
+loads("decider as a string", { decider: "llm" }, true);
+loads("decider none is not for the file", { decider: ["none"] }, true);
+loads("a decider twice", { decider: ["classifier", "classifier"] }, true);
+loads("llm before another decider", { decider: ["llm", "classifier"] }, true);
+loads("allowBelow above askAbove", { command: { askAbove: 0.2, allowBelow: 0.3 } }, true);
 for (const [want, json] of [
   ["llm", {}],
   ["llm", { rules: { allow: ["make *"] }, llm: { thinkingLevel: "medium" } }],
   ["classifier", { classifier: { model: "laya" } }],
   ["command", { command: { argv: ["python", "classify.py"] } }],
-  ["llm", { decider: "llm", classifier: { model: "laya" }, command: { argv: ["python"] } }],
-  ["classifier", { decider: "classifier", command: { argv: ["python"] } }],
-]) check("x", { action: loads(`decider ${want} from ${JSON.stringify(json)}`, json).decider === want ? "x" : "other" }, `config: the decider is ${want} for ${JSON.stringify(json)}`);
+  ["llm", { decider: ["llm"], classifier: { model: "laya" }, command: { argv: ["python"] } }],
+  ["classifier", { decider: ["classifier"], command: { argv: ["python"] } }],
+  ["command,classifier,llm", { decider: ["command", "classifier", "llm"], command: { argv: ["python"] } }],
+  ["", { decider: [] }],
+]) check("x", { action: loads(`decider ${want} from ${JSON.stringify(json)}`, json).decider.join() === want ? "x" : "other" }, `config: the decider is [${want}] for ${JSON.stringify(json)}`);
 {
   // A 0.2 config is ignored with a message that says where its keys went.
   const old = (label, json, decider, ...says) => {
     fs.writeFileSync(configFile, JSON.stringify(json));
     const { config, error = "" } = loadConfig(configFile);
-    check("x", { action: config.decider === decider && error.includes("0.2 shape") && says.every((s) => error.includes(s)) ? "x" : `${config.decider}: ${error}` }, `config: 0.2 shape, ${label}`);
+    check("x", { action: config.decider.join() === decider && error.includes("0.2 shape") && says.every((s) => error.includes(s)) ? "x" : `${config.decider}: ${error}` }, `config: 0.2 shape, ${label}`);
   };
-  old("a local classifier gets no decider", { endpoint: "http://127.0.0.1:9", askAbove: 0.3, classifier: { model: "laya" } }, "none", "endpoint is now classifier.endpoint", "askAbove is now classifier.askAbove", "config.example.jsonc");
-  old("a classifier process gets no decider", { askAbove: 0.3, classifier: { command: ["python", "classify.py"] } }, "none", "command.argv", "askAbove is now command.askAbove");
-  old("withoutUi as a string", { withoutUi: "allow" }, "none", "withoutUi.onAsk");
+  old("a local classifier gets no decider", { endpoint: "http://127.0.0.1:9", askAbove: 0.3, classifier: { model: "laya" } }, "", "endpoint is now classifier.endpoint", "askAbove is now classifier.askAbove", "config.example.jsonc");
+  old("a classifier process gets no decider", { askAbove: 0.3, classifier: { command: ["python", "classify.py"] } }, "", "command.argv", "askAbove is now command.askAbove");
+  old("withoutUi as a string", { withoutUi: "allow" }, "", "withoutUi.onAsk");
   fs.writeFileSync(configFile, JSON.stringify({ askAbove: 0.3, enabled: false, rules: { deny: ["git push --force *"] }, guardedPaths: ["~/unit.service"] }));
   const kept = loadConfig(configFile);
   check(
@@ -297,20 +303,48 @@ for (const [want, json] of [
     { action: kept.config.rules.deny.join() === "git push --force *" && kept.config.guardedPaths.join() === "~/unit.service" && kept.config.enabled === false && kept.config.classifier.askAbove === DEFAULTS.classifier.askAbove && kept.error.includes("only its enabled, rules and guardedPaths are used") ? "x" : `${JSON.stringify(kept.config.rules)} ${kept.error}` },
     "config: 0.2 shape, the keys that did not change still apply",
   );
-  old("a chat decider keeps the default chat decider", { classifier: { llm: { enabled: true, provider: "p", model: "m" } } }, "llm", 'picked with "decider": "llm"');
+  old("a chat decider keeps the default chat decider", { classifier: { llm: { enabled: true, provider: "p", model: "m" } } }, "llm", 'picked with "decider": ["llm"]');
   const jev = loads("a 0.2 Jev config is also a 0.3 one", { classifier: { provider: "typesafe", model: "jev-1.13" } });
-  check("x", { action: jev.decider === "classifier" ? "x" : jev.decider }, "config: a 0.2 Jev config still uses Jev");
+  check("x", { action: jev.decider.join() === "classifier" ? "x" : jev.decider.join() }, "config: a 0.2 Jev config still uses Jev");
 }
-const withExtra = { ...DEFAULTS, decider: "classifier", classifier: { ...DEFAULTS.classifier, extraQuestions: { prod: { question: "Does it touch production?", askAbove: 0.6 }, secrets: "Does it read secrets?" } } };
+const withExtra = { ...DEFAULTS, decider: ["classifier"], classifier: { ...DEFAULTS.classifier, extraQuestions: { prod: { question: "Does it touch production?", askAbove: 0.6 }, secrets: "Does it read secrets?" } } };
 const built = buildQuestions(withExtra);
 check("x", { action: Object.keys(built).join() === "risky,prod,secrets" && built.risky.criteria.true === DEFAULTS.classifier.risky && !built.secrets.criteria ? "x" : "bad" }, "questions: main plus extras");
 const scored = buildQuestions({ ...DEFAULTS, classifier: { ...DEFAULTS.classifier, levels: ["read-only", "edits project files", "destroys data"] } });
 check("x", { action: scored.risky.type === "score" && scored.risky.criteria.length === 3 ? "x" : "bad" }, "questions: levels make the main question a score");
 loads("levels and model", { classifier: { model: "julia", levels: ["a", "b", "c", "d"] } });
 loads("a single level", { classifier: { levels: ["a"] } }, true);
+const { classify } = await import("./index.ts");
+{
+  // A Pi provider with no classifier model, such as LlamaStash serving LANCET: the request goes
+  // to <baseUrl>/systemone with the provider's own key, in the endpoint's question format.
+  const http = await import("node:http");
+  let seen;
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      seen = { url: req.url, body: JSON.parse(body) };
+      const ok = req.headers.authorization === "Bearer k1";
+      res.writeHead(ok ? 200 : 401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(ok ? { model: "lancet-nano-0.4.3", answers: { risky: { type: "noul", noul: 0.4 } } } : { error: { message: "unauthorized" } }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const registry = (key) => ({ findOfType: () => undefined, getProvider: (id) => (id === "llamastash" ? { baseUrl: `http://127.0.0.1:${server.address().port}/v1/` } : undefined), getApiKeyForProvider: async () => key });
+  const via = { ...DEFAULTS, decider: ["classifier"], classifier: { ...DEFAULTS.classifier, provider: "llamastash", model: "lancet" } };
+  const answer = async (key, config = via) => {
+    const r = await classify(config, { tool: "bash", cwd: project, command: "mytool sync" }, undefined, registry(key));
+    return "answers" in r ? String(r.answers.risky) : r.error;
+  };
+  check("x", { action: (await answer("k1")) === "0.4" && seen.url === "/v1/systemone" && seen.body.questions.risky.type === "noul" && seen.body.state.command === "mytool sync" ? "x" : JSON.stringify(seen) }, "provider: a chat provider gets <baseUrl>/systemone with its key");
+  check("x", { action: (await answer("wrong")) === "unauthorized" ? "x" : "bad" }, "provider: a refused key is an error");
+  check("x", { action: /Pi has no classifier model nope\/lancet/.test(await answer("k1", { ...via, classifier: { ...via.classifier, provider: "nope" } })) ? "x" : "bad" }, "provider: an unknown provider is an error");
+  check("x", { action: /expects "kev"/.test(await answer("k1", { ...via, classifier: { ...via.classifier, model: "kev" } })) ? "x" : "bad" }, "provider: the served model name is checked");
+  server.close();
+}
 // Provider mode: questions go through Pi's model registry. The registry here is a stand-in that
 // records the request; the real one is exercised by `node bench.mjs` with a provider set.
-const { classify } = await import("./index.ts");
 const viaPi = { ...withExtra, classifier: { ...withExtra.classifier, provider: "openrouter", model: "typesafe/jev-1.13" } };
 const piQuestions = buildQuestions(viaPi);
 check("x", { action: piQuestions.risky.type === "bool" && piQuestions.secrets.criteria.true === "Yes" && piQuestions.prod.criteria.false === "No" ? "x" : "bad" }, "provider: yes/no questions become bool with both answers described");
@@ -521,7 +555,7 @@ fs.rmSync(linked, { recursive: true });
 const handlers = {};
 extension(
   { on: (name, handler) => (handlers[name] = handler), registerCommand: () => {} },
-  { log: false, decider: "classifier", rules: { ...DEFAULTS.rules, ask: ["niri msg output *"], allow: ["git push origin *"] }, guardedPaths: ["~/guarded-by-config"] },
+  { log: false, decider: ["classifier"], rules: { ...DEFAULTS.rules, ask: ["niri msg output *"], allow: ["git push origin *"] }, guardedPaths: ["~/guarded-by-config"] },
 );
 const answers = [];
 const offered = [];
@@ -591,7 +625,7 @@ fs.rmSync(worktree, { recursive: true });
 {
   // A command allowed for the session asks again once the same text runs a download.
   const h = {};
-  extension({ on: (name, handler) => (h[name] = handler), registerCommand: () => {} }, { log: false, decider: "none" });
+  extension({ on: (name, handler) => (h[name] = handler), registerCommand: () => {} }, { log: false, decider: [] });
   const seen = [];
   const pick = { notify: () => {}, select: async (title, options) => (seen.push(options), seen.length === 1 ? options.find((o) => o.endsWith("for this session")) : "Block") };
   const call = async (command) => Boolean((await h.tool_call({ toolName: "bash", input: { command } }, { cwd: project, hasUI: true, ui: pick }))?.block);
@@ -602,7 +636,7 @@ fs.rmSync(worktree, { recursive: true });
 }
 const allowing = {};
 const headlessAllow = { withoutUi: { ...DEFAULTS.withoutUi, onAsk: "allow" } };
-extension({ on: (name, handler) => (allowing[name] = handler), registerCommand: () => {} }, { log: false, decider: "classifier", ...headlessAllow, rules: { ...DEFAULTS.rules, allow: ["sudo -n true"] } });
+extension({ on: (name, handler) => (allowing[name] = handler), registerCommand: () => {} }, { log: false, decider: ["classifier"], ...headlessAllow, rules: { ...DEFAULTS.rules, allow: ["sudo -n true"] } });
 const headless = async (toolName, input) => Boolean((await allowing.tool_call({ toolName, input }, { cwd: project, hasUI: false, ui }))?.block);
 check("x", { action: !(await headless("bash", { command: "git push" })) && (await headless("bash", { command: "rm -rf /" })) ? "x" : "bad" }, 'handler: withoutUi "allow" runs asks and still blocks denies');
 for (const [label, toolName, input] of [
@@ -619,7 +653,7 @@ check("x", { action: !(await headless("bash", { command: "sudo -n true" })) ? "x
   const h = {};
   extension(
     { on: (name, handler) => (h[name] = handler), registerCommand: () => {} },
-    { log: false, decider: "classifier", rules: { ...DEFAULTS.rules, allow: ["gh pr view *"] }, withoutUi: { onAsk: "block", rules: { allow: ["sudo -n true", "git push origin feat/*"], deny: ["gh *"] } } },
+    { log: false, decider: ["classifier"], rules: { ...DEFAULTS.rules, allow: ["gh pr view *"] }, withoutUi: { onAsk: "block", rules: { allow: ["sudo -n true", "git push origin feat/*"], deny: ["gh *"] } } },
   );
   const blocked = async (command, hasUI, answer) => {
     if (answer) answers.push(answer);
@@ -644,12 +678,12 @@ process.stdin.setEncoding("utf8").on("data", (chunk) => {
     const { command } = JSON.parse(buffer.slice(0, end));
     if (command.includes("EXIT")) process.exit(3);
     if (command.includes("HANG")) continue;
-    console.log(JSON.stringify(command.includes("NOSCORE") ? { score: null, reason: "raw-input-too-long" } : { score: command.includes("risky") ? 0.9 : 0.1 }));
+    console.log(JSON.stringify(command.includes("NOSCORE") ? { score: null, reason: "raw-input-too-long" } : { score: command.includes("risky") ? 0.9 : command.includes("unsure") ? 0.15 : 0.1 }));
   }
 });
 `,
 );
-const viaProcess = { ...DEFAULTS, decider: "command", command: { argv: [process.execPath, stub], timeoutMs: 1500, askAbove: 0.2 } };
+const viaProcess = { ...DEFAULTS, decider: ["command"], command: { argv: [process.execPath, stub], timeoutMs: 1500, askAbove: 0.2 } };
 const scoreOf = async (command, config = viaProcess) => {
   const result = await classify(config, { tool: "bash", cwd: project, command });
   return result.answers?.risky ?? result.error;
@@ -670,7 +704,7 @@ loads("classifier command as one string", { command: { argv: "python classify.py
 
 // Prompt choices for a command the model flags: once, its pattern for the session, or always.
 const stubbed = {};
-extension({ on: (name, handler) => (stubbed[name] = handler), registerCommand: () => {} }, { log: false, decider: "command", command: viaProcess.command });
+extension({ on: (name, handler) => (stubbed[name] = handler), registerCommand: () => {} }, { log: false, decider: ["command"], command: viaProcess.command });
 const viaStub = async (want, label, toolName, input, answer) => {
   if (answer) answers.push(answer);
   const blocked = Boolean((await stubbed.tool_call({ toolName, input }, { cwd: project, hasUI: true, ui }))?.block);
@@ -823,7 +857,7 @@ const stubRegistry = (replies, sent = []) => ({
   },
 });
 const asst = (text, extra = {}) => ({ content: [{ type: "text", text }], stopReason: "stop", usage: { input: 100, cacheRead: 200, output: 5 }, ...extra });
-const llmConfig = (over = {}) => ({ ...DEFAULTS, decider: "llm", llm: { ...DEFAULT_LLM, provider: "stub", model: "m", timeoutMs: 5000, ...over } });
+const llmConfig = (over = {}) => ({ ...DEFAULTS, decider: ["llm"], llm: { ...DEFAULT_LLM, provider: "stub", model: "m", timeoutMs: 5000, ...over } });
 const decided = async (want, label, replies, over) => {
   const sent = [];
   const d = await decideWithLlm(llmConfig(over), transcriptItems([{ message: { role: "user", content: "sync it" } }], DEFAULT_LLM, { tool: "bash", input: { command: "mytool sync" } }), undefined, stubRegistry(replies, sent));
@@ -902,6 +936,20 @@ const llmHandler = (over, replies, top = {}) => {
   const call = async (command, extra = {}) => await tool("bash", { command }, extra);
   return { call, tool, sent, handlers, ctx };
 };
+{
+  // A chain: the classifier process first, the chat model for its unsure range.
+  const chain = { decider: ["command", "llm"], command: { ...viaProcess.command, allowBelow: 0.12 } };
+  const h = llmHandler({}, [asst("<block>no</block>"), asst("<block>no</block>"), asst("<block>no</block>"), asst("<block>no</block>")], chain);
+  const before = offered.length;
+  check("x", { action: !(await h.call("mytool sync fine")) && h.sent.length === 0 ? "x" : `sent ${h.sent.length}` }, "chain: a risk below allowBelow runs without the chat model");
+  check("x", { action: !(await h.call("mytool sync unsure")) && h.sent.length === 1 ? "x" : `sent ${h.sent.length}` }, "chain: a risk from allowBelow up goes to the chat model");
+  answers.push("Block");
+  check("x", { action: (await h.call("mytool sync risky"))?.block && h.sent.length === 1 && offered.length === before + 1 ? "x" : `sent ${h.sent.length}` }, "chain: a risk at askAbove asks you, not the chat model");
+  check("x", { action: !(await h.call("git push origin main")) && h.sent.length === 2 ? "x" : `sent ${h.sent.length}` }, "chain: a rule ask goes to the chat model even when the classifier would pass it");
+  check("x", { action: !(await h.call("mytool EXIT")) && h.sent.length === 3 ? "x" : `sent ${h.sent.length}` }, "chain: a classifier with no answer passes the call on");
+  check("x", { action: !(await h.call("git push origin risky")) && h.sent.length === 4 && offered.length === before + 1 ? "x" : `sent ${h.sent.length}` }, "chain: a rule ask goes to the chat model even when the classifier would ask");
+  stopClassifierProcess();
+}
 {
   const h = llmHandler({}, [asst("<block>no</block>")]);
   check("x", { action: !(await h.call("mytool sync fine")) ? "x" : "blocked" }, "handler llm: a pass runs with no prompt");
@@ -1078,6 +1126,29 @@ bash("ask", "BASE=/tmp/x; read BASE; rm -rf $BASE/a");
 bash("ask", "D=$(mktemp -d); rm -rf $D/../../etc");
 bash("ask", "echo $(cd /etc; pwd); rm -rf x");
 bash("ask", "B=x; cd /etc && rm -rf $B");
+// A copy into a temp directory writes the file inside it; device sinks are not files.
+bash("allow", "cp src/a.rs /tmp");
+bash("allow", "cp a.rs b.rs /tmp/");
+bash("allow", "mv out.log /tmp");
+bash("ask", "cp a.rs /etc");
+bash("ask", "rm -rf /tmp/../etc/x");
+bash("allow", "echo hi | tee /dev/tty");
+bash("allow", "make 2>&1 | tee /dev/stderr build.log");
+// A program in a temp directory is not the tool its name says.
+bash("classify", "/tmp/file /bin/sh");
+bash("classify", "/tmp/ls -la");
+bash("ask", "/tmp/x .env");
+bash("allow", "/usr/bin/git status");
+// Variables that load other code into an allowed program.
+bash("classify", "LD_PRELOAD=/tmp/x.so ls");
+bash("classify", "env LD_PRELOAD=/tmp/x.so ls");
+bash("classify", "export LD_PRELOAD=/tmp/x.so");
+bash("classify", "BASH_ENV=/tmp/x bash -n script.sh");
+bash("classify", 'NODE_OPTIONS="--require ./x.js" tsc');
+bash("allow", "NODE_OPTIONS=--max-old-space-size=8192 tsc");
+bash("allow", "PYTHONPATH=src python3 -m pytest");
+bash("allow", "systemctl --user show-environment");
+bash("ask", "systemctl --user import-environment QT_QPA_PLATFORMTHEME");
 
 fs.rmSync(process.env.PI_CODING_AGENT_DIR, { recursive: true });
 

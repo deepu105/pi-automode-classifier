@@ -1,4 +1,4 @@
-// Runs bench-llm-cases.json through the chat decider ("decider": "llm") and compares the verdicts
+// Runs bench-llm-cases.json through the chat decider ("decider": ["llm"]) and compares the verdicts
 // with what each case says it should be. Every case goes to the model, including the ones a rule
 // would settle, so the model's own judgment is visible; the rule verdict is printed next to it.
 // Nothing under test is executed.
@@ -34,7 +34,7 @@ if (target) {
 if (process.argv[3]) llm.thinkingLevel = process.argv[3];
 if (process.argv[4] === "single") llm.twoStage = false;
 
-const config = { ...DEFAULTS, decider: "llm", llm };
+const config = { ...DEFAULTS, decider: ["llm"], llm };
 if (!llm.provider && !llm.model) {
   console.error("no decider model: set llm.provider and llm.model in the config or pass provider/model");
   process.exit(1);

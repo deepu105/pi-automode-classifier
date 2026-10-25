@@ -6,7 +6,7 @@
 // Needs a Node that runs TypeScript directly (22.18 or newer) and the model server running.
 // With `classifier.provider` set (or a provider/model argument) the questions go through Pi's
 // model registry with Pi's credentials, so `pi` must be installed; the 50 commands are then
-// sent to that provider. With `"decider": "command"` in the config the commands go to the
+// sent to that provider. With "command" in the config's `decider` the commands go to the
 // classifier process in `command.argv`. The bench runs outside a git checkout, so the rules for project files
 // do not apply to it.
 // Usage: node bench.mjs [askAbove] [endpoint | provider/model]
@@ -22,14 +22,14 @@ const { classify, classifierName, classifierProcessPid, loadConfig, DEFAULTS } =
 const { bashVerdict, makeScope } = await import("./rules.ts");
 
 // The bench measures a server that is already running, with your `classifier` block, or your
-// `command` block when that is your decider. Your own rules and extra questions are left out so
+// `command` block when your decider list has it. Your own rules and extra questions are left out so
 // runs stay comparable.
 const mine = loadConfig().config;
 const target = process.argv[3] ?? "";
-const config = { ...DEFAULTS, decider: mine.decider === "command" && !target ? "command" : "classifier", classifier: { ...mine.classifier, extraQuestions: {} }, command: mine.command };
+const config = { ...DEFAULTS, decider: mine.decider.includes("command") && !target ? ["command"] : ["classifier"], classifier: { ...mine.classifier, extraQuestions: {} }, command: mine.command };
 if (/^https?:/.test(target)) config.classifier.endpoint = target;
 else if (target) Object.assign(config.classifier, { provider: target.slice(0, target.indexOf("/")), model: target.slice(target.indexOf("/") + 1) });
-const viaProcess = config.decider === "command";
+const viaProcess = config.decider[0] === "command";
 const askAbove = Number(process.argv[2] ?? (viaProcess ? config.command : config.classifier).askAbove);
 
 // Pi's own model registry, for provider mode. Pi is a peer dependency, so when it is not

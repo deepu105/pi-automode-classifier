@@ -44,6 +44,9 @@ export interface Verdict {
   pattern?: string;
   // The pattern came from an ask, so it is offered for the session only, never saved.
   fromAsk?: boolean;
+  // An ask the rules sent to the chat model. It skips the classifiers listed before the chat
+  // model: only the chat model sees whether the user asked for it.
+  ruleAsk?: boolean;
   // Set on a classify verdict that runs files the session wrote: their paths, so the decider can
   // be given what runs.
   files?: string[];
@@ -66,7 +69,7 @@ const guardAsk = (reason: string): Verdict => ({ action: "ask", reason, locked: 
 const criticalAsk = (reason: string): Verdict => ({ action: "ask", reason, firm: true, critical: true });
 // With the chat decider, Claude Code's split: the rules allow what is plainly routine and block
 // what is plainly destructive, and the decider judges the rest instead of you being asked.
-const forDecider = (v: Verdict, scope: Scope): Verdict => (scope.chatDecider && v.action === "ask" && !v.locked && !v.firm ? { ...v, action: "classify" } : v);
+const forDecider = (v: Verdict, scope: Scope): Verdict => (scope.chatDecider && v.action === "ask" && !v.locked && !v.firm ? { ...v, action: "classify", ruleAsk: true } : v);
 
 // ---- paths ----
 
@@ -606,7 +609,7 @@ const SUBCOMMANDS: Record<string, { allow: string; ask?: Record<string, string> 
   },
   systemctl: {
     allow: `status show cat list-units list-unit-files list-timers list-sockets list-dependencies
-      is-active is-enabled is-failed get-default help`,
+      is-active is-enabled is-failed get-default help show-environment list-jobs`,
     ask: {},
   },
   loginctl: { allow: `list-sessions list-users list-seats show-session show-user session-status user-status`, ask: {} },
@@ -666,6 +669,10 @@ const FIRST_OPERAND_NOT_PATH = new Set(["chmod", "chown", "chgrp", "sed"]);
 const COPIERS = new Set(["cp", "mv", "ln", "install", "rsync"]);
 const CONTENT_WRITERS = new Set(["tee", "truncate", "shred", "patch"]);
 
+// Variables that load other code into the program they are set for. NODE_OPTIONS only with
+// an option that loads a file; it often just sets a heap size.
+const LOADS_CODE = /^(LD_PRELOAD|LD_AUDIT|DYLD_INSERT_LIBRARIES|BASH_ENV|ENV|NODE_OPTIONS|PERL5OPT|RUBYOPT)=(.*)$/s;
+const NODE_LOADS = /(^|\s)(-r|--require|--import|--loader|--experimental-loader)(=|\s|$)/;
 const WRAPPERS = new Set(["env", "nice", "ionice", "timeout", "time", "command", "builtin", "nohup", "setsid", "stdbuf", "exec", "chrt", "taskset"]);
 // Wrappers that run the same program with the same environment and PATH lookup.
 const SAME_PROGRAM_WRAPPERS = new Set(["timeout", "time", "nice", "ionice", "nohup", "setsid", "stdbuf"]);
@@ -691,17 +698,21 @@ const hasFlag = (args: string[], short: string, long?: string) =>
 
 function writeTargets(cmd: string, args: string[], scope: Scope, literalInput = false): Verdict {
   const paths = FIRST_OPERAND_NOT_PATH.has(cmd) ? operands(args).slice(1) : operands(args);
+  const sources = paths.slice(0, -1);
+  const dest = paths.length > 1 ? resolveWord(paths.at(-1)!, scope) : undefined;
+  const intoDir = COPIERS.has(cmd) && paths.length > 1 && (sources.length > 1 || paths.at(-1)!.endsWith("/") || (!!dest && fs.statSync(dest, { throwIfNoEntry: false })?.isDirectory()));
   const targets = WRITERS[cmd] === "last" ? paths.slice(-1) : paths;
   for (const t of targets) {
-    const p = resolveWord(t, scope);
-    if (isGuarded(p, scope)) return guardAsk(`${cmd} changes the auto-mode guard's own files`);
-    if (isPiFile(p, scope)) return piAsk(`${cmd} changes Pi's own files: ${t}`);
-    if (!isLocal(p, scope)) return outside(`${cmd} writes outside the working directory: ${t}`, p);
+    // Copied into a directory, the files land inside it: `cp a.rs /tmp` writes /tmp/a.rs.
+    const written = intoDir && t === paths.at(-1) && dest ? sources.map((s) => path.join(dest, path.basename(s))) : [resolveWord(t, scope)];
+    for (const p of written) {
+      if (p && DEV_SINKS.test(p)) continue;
+      if (isGuarded(p, scope)) return guardAsk(`${cmd} changes the auto-mode guard's own files`);
+      if (isPiFile(p, scope)) return piAsk(`${cmd} changes Pi's own files: ${t}`);
+      if (!isLocal(p, scope)) return outside(`${cmd} writes outside the working directory: ${t}`, p);
+    }
   }
   if (COPIERS.has(cmd) && paths.length > 1) {
-    const sources = paths.slice(0, -1);
-    const dest = resolveWord(paths.at(-1)!, scope);
-    const intoDir = sources.length > 1 || paths.at(-1)!.endsWith("/") || (!!dest && fs.statSync(dest, { throwIfNoEntry: false })?.isDirectory());
     for (const source of sources) {
       const from = resolveWord(source, scope);
       const kept = from && originOf(from, scope);
@@ -958,6 +969,10 @@ function simple(cmd: Simple, scope: Scope, depth = 0): Verdict {
 function command(cmd: Simple, scope: Scope, depth: number): Verdict {
   let verdict = ALLOW;
   const argv = unwrap(cmd.argv);
+  const assigned = cmd.argv.slice(0, cmd.argv.length - argv.length);
+  if (["export", "declare", "typeset", "readonly"].includes(argv[0])) assigned.push(...argv.slice(1));
+  const loader = assigned.map((w) => LOADS_CODE.exec(w)).find((m) => m && (m[1] !== "NODE_OPTIONS" || NODE_LOADS.test(m[2])));
+  if (loader) verdict = classify(`sets ${loader[1]}, which loads other code into the program`);
   if (!argv.length) return verdict;
 
   const name = path.basename(argv[0]);
@@ -974,6 +989,12 @@ function command(cmd: Simple, scope: Scope, depth: number): Verdict {
   if (secret) verdict = worst(verdict, criticalAsk(`${name} reads a credential file: ${secret}`));
   // Pi's package commands change its settings and what code every session loads.
   if (name === "pi" && ["install", "remove", "uninstall", "update", "config"].includes(args[0])) verdict = worst(verdict, piAsk(`pi ${args[0]} changes Pi's own setup`));
+  // A program in a temp directory, or one this session wrote or downloaded, is not the tool its
+  // name says: /tmp/file is not file(1).
+  if (argv[0].includes("/")) {
+    const p = resolveWord(argv[0], scope);
+    if (p && (inTmp(p) || originOf(p, scope) !== undefined)) return worst(verdict, runFile(argv[0], args, scope) ?? classify(`runs ${argv[0]}`));
+  }
 
   if (name === "sudo" || name === "doas") {
     const inner = afterFlags(args, /^-[ugCDhpRrTU]$/);

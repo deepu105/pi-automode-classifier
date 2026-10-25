@@ -29,6 +29,7 @@
     "automode-rules.json",
     "config.example.jsonc",
     "systemd",
+    "lancet",
     "README.md",
     "LICENSE"
   ],

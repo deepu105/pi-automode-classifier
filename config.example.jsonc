@@ -35,10 +35,15 @@
     }
   },
 
-  // What judges the calls the rules leave open: "llm", "classifier" or "command". Left out, it
-  // is "command" when command.argv is set, "classifier" when the file has a `classifier` block,
-  // and "llm" otherwise.
-  "decider": "llm",
+  // Who judges the calls the rules leave open, in the order they run:
+  // - ["llm"]: the chat model.
+  // - ["command"] or ["classifier"]: a classifier scores each call from 0 to 1. A score at or
+  //   above askAbove asks you, a lower score runs.
+  // - ["command", "llm"]: the classifier scores first. Below allowBelow the call runs, at or
+  //   above askAbove it asks you, and in between the chat model decides.
+  // "llm" must be last. []: every such call asks you. Not set: ["command"] if command.argv is
+  // set, ["classifier"] if the file has a `classifier` block, ["llm"] otherwise.
+  "decider": ["llm"],
 
   // A chat model, in Claude Code auto mode style. It judges with the user's messages and the
   // session's tool calls, and also gets the asks, except root, credential reads, downloaded code,
@@ -99,13 +104,18 @@
     // Started when nothing listens on `endpoint`, for example
     // ["systemctl", "--user", "start", "pi-automode-classifier.service"]. Empty: start nothing.
     "startCommand": [],
-    // A model through Pi instead, for example "typesafe" with model "jev-1.13".
+    // A model through Pi instead, for example "typesafe" with model "jev-1.13". A provider Pi lists
+    // no such classifier for, such as LlamaStash serving LANCET, gets the request at
+    // <its baseUrl>/systemone, with its own API key.
     "provider": "",
     // Local server: part of the model name it must report. With `provider`: the model id in Pi.
     "model": "kev",
     "timeoutMs": 5000,
     // 0 asks for every classified call.
     "askAbove": 0.2,
+    // Only used when another decider comes after this one: a score below this runs, and a score
+    // from this up to askAbove goes to the next decider.
+    "allowBelow": 0.1,
     // The question the model answers, and what its yes and no mean.
     "question": "Is this command risky?",
     "risky": "Deletes data, touches files outside the project, changes the system, uses credentials, or sends data to a remote server",
@@ -123,6 +133,9 @@
     // argv, for example ["~/.local/share/lancet/venv/bin/python", "classify.py"].
     "argv": [],
     "timeoutMs": 5000,
-    "askAbove": 0.2
+    "askAbove": 0.2,
+    // Only used when another decider comes after this one: a score below this runs, and a score
+    // from this up to askAbove goes to the next decider.
+    "allowBelow": 0.1
   }
 }

@@ -2,17 +2,19 @@
 //
 // 1. Deterministic rules (rules.ts) settle most calls: allow, ask or deny. Your own rules from
 //    the config replace the built-in verdict.
-// 2. Calls the rules leave open go to the decider. By default that is a chat model, the
-//    session's own or `llm.provider`/`llm.model`, which judges them over the same context Claude
-//    Code's auto mode uses: the user's own messages and the session's tool calls (automode.ts).
-//    It also gets most asks (forDecider in rules.ts), and blocks what it judges unsafe.
-//    `decider: "classifier"` uses a decision model instead (Kev-0.8B on a llama-server
-//    `/v1/systemone` endpoint, or one through Pi such as Jev), and `decider: "command"` a
-//    classifier that runs as a local process (LANCET). Their risk below `askAbove` runs without
-//    a prompt; they never block on their own.
-// 3. Everything else gets a confirm prompt: rule "ask" verdicts, a classifier risk at or above
-//    `askAbove`, or a classifier that is down, slow or returns something invalid. Without a UI
-//    (print mode, subagents) these calls are blocked unless `withoutUi.onAsk` is "allow".
+// 2. Calls the rules leave open go to the deciders listed in `decider`, in that order.
+//    - "llm" (the default) is a chat model: the session's own, or `llm.provider`/`llm.model`. It
+//      judges with the same context as Claude Code's auto mode: the user's messages and the
+//      session's tool calls (automode.ts). It also gets most asks (forDecider in rules.ts), and
+//      blocks what it judges unsafe.
+//    - "classifier" is a decision model (Kev-0.8B on a llama-server `/v1/systemone` endpoint, or
+//      one through Pi such as Jev), and "command" a classifier that runs as a local process
+//      (LANCET). Each scores a call from 0 to 1. At or above `askAbove` it asks you; below, the
+//      call runs. When another decider comes next, a score from `allowBelow` up to `askAbove`
+//      goes to that one instead. A classifier never blocks.
+// 3. Everything else gets a confirm prompt: rule "ask" verdicts, a score at or above `askAbove`,
+//    and a last classifier that is down, slow or gives no score. Without a UI (print mode,
+//    subagents) these calls are blocked unless `withoutUi.onAsk` is "allow".
 //
 // Covered tools: any tool with a string `command` input (bash and similar), write/edit, and
 // read/grep of a credential file.
@@ -56,6 +58,7 @@ export interface Question {
 }
 
 export type Decider = "llm" | "classifier" | "command";
+type Scorer = Exclude<Decider, "llm">;
 
 export interface ClassifierConfig {
   // Local decision model server, used when `provider` is empty.
@@ -74,6 +77,8 @@ export interface ClassifierConfig {
   timeoutMs: number;
   // A risk at or above this gets a confirm prompt. 0 asks for every classified call.
   askAbove: number;
+  // Only used when another decider comes next: a score from this up to askAbove goes to it.
+  allowBelow: number;
   // The main question and the descriptions of its yes and no answers.
   question: string;
   risky: string;
@@ -105,17 +110,18 @@ export interface Config {
     // Added to `rules` when there is no UI. A deny here wins over an allow in `rules`.
     rules: { allow: string[]; deny: string[] };
   };
-  // What judges the calls the rules leave open. Left out of the file, it follows from the blocks
-  // there: `command` with an argv, then `classifier`, then `llm`. "none" only comes from a
-  // rejected 0.2 config that used a classifier, and then those calls ask.
-  decider: Decider | "none";
+  // Who judges the calls the rules leave open, in the order they run. "llm" must be last. Not
+  // set: ["command"] if command.argv is set, ["classifier"] if the file has a `classifier`
+  // block, ["llm"] otherwise. Empty: those calls ask you, as with a 0.2 config that used a
+  // classifier.
+  decider: Decider[];
   classifier: ClassifierConfig;
   // A general chat model as the decider, in Claude Code auto mode style.
   llm: LlmConfig;
   // A classifier that runs as a local process, for example LANCET's classify.py. Each command
   // goes to its stdin as a JSON line {"command", "shell", "cwd"} and it answers with a JSON line
   // that has a `score` from 0 to 1. A leading `~/` in argv is expanded.
-  command: { argv: string[]; timeoutMs: number; askAbove: number };
+  command: { argv: string[]; timeoutMs: number; askAbove: number; allowBelow: number };
 }
 
 export const DEFAULTS: Config = {
@@ -125,7 +131,7 @@ export const DEFAULTS: Config = {
   allowedPaths: [],
   guardedPaths: [],
   withoutUi: { onAsk: "block", rules: { allow: [], deny: [] } },
-  decider: "llm",
+  decider: ["llm"],
   // Of the question designs compared on bench-cases.json, one yes/no question with both answers
   // described was the best or within 0.01 AUC of it on Kev-0.8B and Laya.
   classifier: {
@@ -135,6 +141,7 @@ export const DEFAULTS: Config = {
     model: "kev",
     timeoutMs: 5000,
     askAbove: 0.2,
+    allowBelow: 0.1,
     question: "Is this command risky?",
     risky: "Deletes data, touches files outside the project, changes the system, uses credentials, or sends data to a remote server",
     safe: "Routine development work that only reads, builds, tests or edits files inside the project directory",
@@ -142,7 +149,8 @@ export const DEFAULTS: Config = {
     extraQuestions: {},
   },
   llm: DEFAULT_LLM,
-  command: { argv: [], timeoutMs: 5000, askAbove: 0.2 },
+  // Picked with LANCET Nano 0.4.3; the README has the numbers.
+  command: { argv: [], timeoutMs: 5000, askAbove: 0.2, allowBelow: 0.1 },
 };
 
 // The guard's own files and Pi's settings: changes to them always ask.
@@ -179,7 +187,7 @@ const SCHEMA: Schema = {
   allowedPaths: isStrings,
   guardedPaths: isStrings,
   withoutUi: { onAsk: oneOf("block", "allow"), rules: { allow: isStrings, deny: isStrings } },
-  decider: oneOf("llm", "classifier", "command"),
+  decider: (v) => isStrings(v) && (v as string[]).every((d) => ["llm", "classifier", "command"].includes(d)) && new Set(v as string[]).size === (v as string[]).length,
   classifier: {
     endpoint: (v) => typeof v === "string" && URL.canParse(v),
     startCommand: isStrings,
@@ -187,6 +195,7 @@ const SCHEMA: Schema = {
     model: isString,
     timeoutMs: isTimeout,
     askAbove: isThreshold,
+    allowBelow: isThreshold,
     question: isString,
     risky: isString,
     safe: isString,
@@ -218,7 +227,7 @@ const SCHEMA: Schema = {
     },
     prompt: { environment: isStrings, hardDeny: isStrings, softDeny: isStrings, allow: isStrings },
   },
-  command: { argv: isStrings, timeoutMs: isTimeout, askAbove: isThreshold },
+  command: { argv: isStrings, timeoutMs: isTimeout, askAbove: isThreshold, allowBelow: isThreshold },
 };
 
 // The first problem in `value`, naming its key. Own keys only, so "toString" is unknown.
@@ -249,8 +258,8 @@ function moved(raw: Record<string, unknown>): string[] {
   const owner = (key: string) => (Object.hasOwn(classifier, "command") && (key === "timeoutMs" || key === "askAbove") ? "command" : "classifier");
   const out = ["endpoint", "timeoutMs", "askAbove", "startCommand"].filter((key) => Object.hasOwn(raw, key)).map((key) => `${key} is now ${owner(key)}.${key}`);
   if (typeof raw.withoutUi === "string") out.push("withoutUi is now withoutUi.onAsk");
-  if (Object.hasOwn(classifier, "llm")) out.push('classifier.llm is now llm, picked with "decider": "llm", and its keys changed');
-  if (Object.hasOwn(classifier, "command")) out.push('classifier.command is now command.argv, picked with "decider": "command"');
+  if (Object.hasOwn(classifier, "llm")) out.push('classifier.llm is now llm, picked with "decider": ["llm"], and its keys changed');
+  if (Object.hasOwn(classifier, "command")) out.push('classifier.command is now command.argv, picked with "decider": ["command"]');
   return out;
 }
 
@@ -286,7 +295,7 @@ export function loadConfig(file = CONFIG_FILE): { config: Config; error?: string
     // decider would send its commands to a model it never picked, so those calls ask instead.
     const llm = isObject(raw.classifier) && isObject(raw.classifier.llm) && raw.classifier.llm.enabled === true;
     return {
-      config: llm ? base : { ...base, decider: "none" },
+      config: llm ? base : { ...base, decider: [] },
       error:
         `${file} has the 0.2 shape, so ${kept.length ? `only its ${kept.join(", ").replace(/, ([^,]+)$/, " and $1")} ${kept.length > 1 ? "are" : "is"} used` : "it is ignored"} and the rest is default` +
         `${llm ? "" : ", with no decider: what one would judge asks you"}. In 0.3 ${old.join("; ")}. Every key is in ${EXAMPLE_FILE}.`,
@@ -296,8 +305,13 @@ export function loadConfig(file = CONFIG_FILE): { config: Config; error?: string
   if (found) return ignored(found);
   const config = merge(DEFAULTS as unknown as Record<string, unknown>, raw as Record<string, unknown>, SCHEMA) as unknown as Config;
   const given = raw as Partial<Record<keyof Config, unknown>>;
-  config.decider = (given.decider as Decider | undefined) ?? (config.command.argv.length ? "command" : given.classifier ? "classifier" : "llm");
-  if (config.decider === "command" && !config.command.argv.length) return ignored('"decider" is "command" and command.argv is empty');
+  config.decider = (given.decider as Decider[] | undefined) ?? [config.command.argv.length ? "command" : given.classifier ? "classifier" : "llm"];
+  const { decider } = config;
+  if (decider.includes("llm") && decider.at(-1) !== "llm") return ignored('"llm" must be the last entry in "decider"');
+  if (decider.includes("command") && !config.command.argv.length) return ignored('"decider" has "command" and command.argv is empty');
+  for (const stage of ["classifier", "command"] as const) {
+    if (config[stage].allowBelow > config[stage].askAbove) return ignored(`${stage}.allowBelow is above ${stage}.askAbove`);
+  }
   try {
     compileRules({ ...config.rules, allow: [...config.rules.allow, ...config.withoutUi.rules.allow], deny: [...config.rules.deny, ...config.withoutUi.rules.deny] });
   } catch (e) {
@@ -308,8 +322,7 @@ export function loadConfig(file = CONFIG_FILE): { config: Config; error?: string
 
 
 // Pi's registry calls a yes/no question "bool" and requires both answers to be described.
-export function buildQuestions(config: Config) {
-  const viaPi = Boolean(config.classifier.provider);
+export function buildQuestions(config: Config, viaPi = Boolean(config.classifier.provider)) {
   const yesNo = (instructions: string, yes?: string, no?: string) =>
     viaPi
       ? { type: "bool", instructions, criteria: { true: yes ?? "Yes", false: no ?? "No" } }
@@ -321,10 +334,13 @@ export function buildQuestions(config: Config) {
   return questions;
 }
 
+// The classifier to use when a caller names none: the first one in `decider`.
+const firstScorer = (config: Config): Scorer => (config.decider.find((d) => d !== "llm") as Scorer | undefined) ?? "classifier";
+
 // The first question answered at or above its threshold, the main question first.
-export function flagged(config: Config, answers: Record<string, number>): string | undefined {
-  const viaProcess = config.decider === "command";
-  const askAbove = viaProcess ? config.command.askAbove : config.classifier.askAbove;
+export function flagged(config: Config, answers: Record<string, number>, stage = firstScorer(config)): string | undefined {
+  const viaProcess = stage === "command";
+  const askAbove = config[stage].askAbove;
   if (answers.risky >= askAbove) return `model risk ${answers.risky.toFixed(2)} (asks at ${askAbove} and above)`;
   if (viaProcess) return undefined;
   for (const [id, q] of Object.entries(config.classifier.extraQuestions)) {
@@ -342,6 +358,8 @@ export type Classified = { answers: Record<string, number>; ms: number; tokens?:
 // from Pi's SDK in bench.mjs.
 export interface Registry {
   findOfType(type: "classifier", provider: string, id: string): unknown;
+  getProvider?(provider: string): { baseUrl?: string } | undefined;
+  getApiKeyForProvider?(provider: string): Promise<string | undefined>;
   classify(
     model: unknown,
     context: { state: Record<string, unknown>; questions: Record<string, object> },
@@ -445,7 +463,7 @@ function askClassifierProcess(config: Config, state: Record<string, string>, sig
   const run = async (): Promise<Classified> => {
     const startedAt = performance.now();
     const ms = () => Math.round(performance.now() - startedAt);
-    const program = classifierName(config);
+    const program = classifierName(config, "command");
     const { argv, timeoutMs } = config.command;
     if (classifierProcess?.key !== argv.join("\0")) stopClassifierProcess();
     const proc = (classifierProcess ??= startClassifierProcess(argv));
@@ -789,42 +807,59 @@ function saveToConfig(list: "allowedPaths" | "allow", value: string): string | u
 }
 
 // What answers the questions, for the log and the status command.
-export const classifierName = ({ decider, classifier, command }: Config) =>
-  decider === "command"
-    ? command.argv.filter((word) => !word.startsWith("-")).slice(0, 2).map((word) => path.basename(word)).join(" ")
-    : classifier.provider
-      ? `${classifier.provider}/${classifier.model}`
-      : classifier.model;
+export const classifierName = (config: Config, stage = firstScorer(config)) =>
+  stage === "command"
+    ? config.command.argv.filter((word) => !word.startsWith("-")).slice(0, 2).map((word) => path.basename(word)).join(" ")
+    : config.classifier.provider
+      ? `${config.classifier.provider}/${config.classifier.model}`
+      : config.classifier.model;
 
-// The answer of the classifier decider, or of the classifier process with decider "command".
-export async function classify(config: Config, state: Record<string, string>, signal?: AbortSignal, registry?: Registry): Promise<Classified> {
-  if (config.decider === "command") return askClassifierProcess(config, state, signal);
+// The answer of the classifier decider, or of the classifier process for "command".
+export async function classify(config: Config, state: Record<string, string>, signal?: AbortSignal, registry?: Registry, stage = firstScorer(config)): Promise<Classified> {
+  if (stage === "command") return askClassifierProcess(config, state, signal);
   const started = performance.now();
   const ms = () => Math.round(performance.now() - started);
-  const questions = buildQuestions(config);
-  const ids = Object.keys(questions);
   const { endpoint, provider, model: expected, timeoutMs } = config.classifier;
   const timedOut = { error: `no answer in ${timeoutMs} ms`, ms: 0 };
+  const model = provider ? registry?.findOfType("classifier", provider, expected) : undefined;
 
+  if (provider && !model) {
+    // A chat provider with a System One server behind its baseUrl, such as LANCET under
+    // LlamaStash: Pi lists no classifier there, so the request goes to <baseUrl>/systemone with
+    // the provider's own key.
+    const base = registry?.getProvider?.(provider)?.baseUrl;
+    if (!registry || !base) return { error: `Pi has no classifier model ${provider}/${expected}`, ms: ms() };
+    const key = await registry.getApiKeyForProvider?.(provider);
+    return systemOne(config, `${base.replace(/\/+$/, "")}/systemone`, key ? { Authorization: `Bearer ${key}` } : {}, state, signal, started);
+  }
   if (provider) {
-    const model = registry?.findOfType("classifier", provider, expected);
-    if (!registry || !model) return { error: `Pi has no classifier model ${provider}/${expected}`, ms: ms() };
+    const questions = buildQuestions(config);
+    const ids = Object.keys(questions);
     const timeout = AbortSignal.timeout(timeoutMs);
     // classify() never rejects; a failure comes back as a stop reason.
-    const result = await registry.classify(model, { state, questions }, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
+    const result = await registry!.classify(model, { state, questions }, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
     if (timeout.aborted) return { ...timedOut, ms: ms() };
     if (result.stopReason !== "stop") return { error: clip(result.errorMessage ?? `${provider}/${expected} gave no answer`, 200), ms: ms() };
     const answers = readAnswers(config, ids, result.answers);
     return answers ? { answers, ms: ms(), tokens: result.usage?.input } : { error: "invalid response from the model", ms: ms() };
   }
+  return systemOne(config, `${endpoint}/v1/systemone`, {}, state, signal, started);
+}
 
+// One request to a System One endpoint. Only the local `endpoint` gets its server started.
+async function systemOne(config: Config, url: string, headers: Record<string, string>, state: Record<string, string>, signal: AbortSignal | undefined, started: number): Promise<Classified> {
+  const ms = () => Math.round(performance.now() - started);
+  const questions = buildQuestions(config, false);
+  const ids = Object.keys(questions);
+  const { endpoint, model: expected, timeoutMs } = config.classifier;
+  const local = url === `${endpoint}/v1/systemone`;
   for (let attempt = 0; ; attempt++) {
     try {
       const timeout = AbortSignal.timeout(timeoutMs);
-      const res = await fetch(`${endpoint}/v1/systemone`, {
+      const res = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ state, questions }),
+        headers: { "Content-Type": "application/json", ...headers },
+        body: JSON.stringify({ model: expected, state, questions }),
         signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
       });
       const body = await res.json().catch(() => undefined);
@@ -840,9 +875,9 @@ export async function classify(config: Config, state: Record<string, string>, si
       return answers ? { answers, ms: ms(), tokens: body?.usage?.input_tokens } : { error: "invalid response from the model", ms: ms() };
     } catch (e) {
       const err = e as Error & { cause?: { code?: string } };
-      if (err.name === "TimeoutError") return { ...timedOut, ms: ms() };
-      if (attempt === 0 && err.cause?.code === "ECONNREFUSED" && (await startServer(config, timeoutMs))) continue;
-      return { error: `server not reachable at ${endpoint}`, ms: ms() };
+      if (err.name === "TimeoutError") return { error: `no answer in ${timeoutMs} ms`, ms: ms() };
+      if (local && attempt === 0 && err.cause?.code === "ECONNREFUSED" && (await startServer(config, timeoutMs))) continue;
+      return { error: `server not reachable at ${new URL(url).origin}`, ms: ms() };
     }
   }
 }
@@ -899,10 +934,10 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
     if (configError && ctx.hasUI) ctx.ui.notify(`pi-automode-classifier: ${configError}`, "warning");
     // Warm the server in the background so the first classified call does not wait for it. The
     // chat decider takes its place, so then it is not needed.
-    if (enabled && config.decider === "classifier" && !config.classifier.provider) void health(config, 300).then((up) => up || startServer(config, 10_000));
+    if (enabled && config.decider.includes("classifier") && !config.classifier.provider) void health(config, 300).then((up) => up || startServer(config, 10_000));
     // With the chat decider the fixed rule prompt is some 25k tokens, and a cold prefill costs
     // the first real call tens of seconds. One throwaway call fills the prefix cache instead.
-    if (enabled && config.decider === "llm" && config.llm.warmCache) {
+    if (enabled && config.decider.includes("llm") && config.llm.warmCache) {
       const warm: TranscriptItem[] = [{ kind: "user", text: "warming the rule prompt" }, { kind: "action", tool: "bash", input: { command: "true" } }];
       void decideWithLlm(config, warm, undefined, ctx.modelRegistry as unknown as ChatRegistry, ctx.model as unknown as Record<string, unknown>).catch(() => undefined);
     }
@@ -924,7 +959,7 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
       allowedPaths: [...allowedPaths, ...roots],
       files,
       project: (p) => inCheckout(p, roots),
-      chatDecider: config.decider === "llm",
+      chatDecider: config.decider.includes("llm"),
     });
     let subject: string;
     let verdict: Verdict;
@@ -959,7 +994,42 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
       return undefined;
     }
 
-    if (verdict.action === "classify" && config.decider === "llm") {
+    // The classifiers, in `decider` order. A score at or above askAbove asks you. When another
+    // decider comes next, a score from allowBelow up, or no score, goes to that one; otherwise
+    // the call runs. Two kinds of call skip the classifiers and go to the chat model: an ask from
+    // the rules, and a call that runs files the session wrote. A classifier sees only the
+    // command, so it cannot tell whether the user asked for it or what the file holds.
+    let toLlm = false;
+    if (verdict.action === "classify") {
+      const chain = verdict.ruleAsk || verdict.files ? config.decider.filter((d) => d === "llm") : config.decider;
+      const steps: Record<string, unknown>[] = [];
+      for (const [i, stage] of chain.entries()) {
+        if (stage === "llm") {
+          toLlm = true;
+          break;
+        }
+        const last = i === chain.length - 1;
+        const result = await classify(config, { tool: event.toolName, cwd: ctx.cwd, command: subject }, ctx.signal, ctx.modelRegistry as unknown as Registry, stage);
+        steps.push({ decider: stage, model: classifierName(config, stage), ...result });
+        entry.steps = steps;
+        const risk = "answers" in result ? flagged(config, result.answers, stage) : undefined;
+        if (risk) {
+          verdict = { ...verdict, action: "ask", reason: risk };
+          break;
+        }
+        if (!last && ("error" in result || result.answers.risky >= config[stage].allowBelow)) continue;
+        if ("error" in result) {
+          verdict = { ...verdict, action: "ask", reason: `model gave no answer: ${result.error}` };
+          break;
+        }
+        counts.model++;
+        finish("allow", stage);
+        return undefined;
+      }
+      if (!chain.length) verdict = { ...verdict, action: "ask" };
+    }
+
+    if (toLlm) {
       const llm = config.llm;
       const branch = (ctx.sessionManager?.getBranch?.() ?? []) as { message?: Record<string, unknown> }[];
       const actionFiles = verdict.files?.length ? fileContents(verdict.files) : undefined;
@@ -1006,18 +1076,6 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
         finish("allow", "llm");
         return undefined;
       }
-    } else if (verdict.action === "classify" && config.decider === "none") {
-      verdict = { ...verdict, action: "ask" };
-    } else if (verdict.action === "classify") {
-      const result = await classify(config, { tool: event.toolName, cwd: ctx.cwd, command: subject }, ctx.signal, ctx.modelRegistry as unknown as Registry);
-      Object.assign(entry, result, { model: classifierName(config) });
-      const reason = "answers" in result ? flagged(config, result.answers) : `model gave no answer: ${result.error}`;
-      if (!reason) {
-        counts.model++;
-        finish("allow", "model");
-        return undefined;
-      }
-      verdict = { ...verdict, action: "ask", reason };
     }
 
     if (verdict.action === "allow") {
@@ -1095,24 +1153,30 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
       if (arg === "on" || arg === "off") enabled = arg === "on";
       else if (arg && arg !== "status") return ctx.ui.notify("Usage: /automode-classifier status | on | off", "warning");
       const { llm, classifier, command } = config;
-      let where: string;
-      if (config.decider === "llm") {
-        const lists = mergeRules(DEFAULT_RULES, llm.prompt);
-        where =
-          `chat decider ${llmName(llm, ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined)} (${llm.twoStage ? "two-stage" : "one stage"}, thinking ${llm.thinkingLevel}), ` +
-          `blocks by ${llm.onBlock}, ${llm.onNoAnswer === "block" ? "fails closed" : "asks when it cannot answer"}; ` +
-          `${lists.hardDeny.length} hard block, ${lists.softDeny.length} soft block, ${lists.allow.length} allow, ${lists.environment.length} environment lines; ` +
-          `transcript ${llm.transcript.maxEntries} entries / ${llm.transcript.maxChars} chars`;
-      } else if (config.decider === "command") {
-        where = `classifier process ${command.argv.join(" ")}: ${classifierProcess ? "running" : "not running"} (asks at risk >= ${command.askAbove})`;
-      } else if (config.decider === "classifier") {
+      // What a classifier sends to the next decider.
+      const passes = (stage: Scorer, i: number) => (i < config.decider.length - 1 ? `; ${config[stage].allowBelow} to ${config[stage].askAbove} goes to the next decider` : "");
+      const describe = async (stage: Decider, i: number) => {
+        if (stage === "llm") {
+          const lists = mergeRules(DEFAULT_RULES, llm.prompt);
+          return (
+            `chat decider ${llmName(llm, ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined)} (${llm.twoStage ? "two-stage" : "one stage"}, thinking ${llm.thinkingLevel}), ` +
+            `blocks by ${llm.onBlock}, ${llm.onNoAnswer === "block" ? "fails closed" : "asks when it cannot answer"}; ` +
+            `${lists.hardDeny.length} hard block, ${lists.softDeny.length} soft block, ${lists.allow.length} allow, ${lists.environment.length} environment lines; ` +
+            `transcript ${llm.transcript.maxEntries} entries / ${llm.transcript.maxChars} chars`
+          );
+        }
+        if (stage === "command") return `classifier process ${command.argv.join(" ")}: ${classifierProcess ? "running" : "not running"} (asks at risk >= ${command.askAbove}${passes(stage, i)})`;
         const extra = Object.keys(classifier.extraQuestions);
-        where =
+        return (
           (classifier.provider
             ? `model ${classifier.provider}/${classifier.model} through Pi (commands are sent to ${classifier.provider})`
             : `model server ${classifier.endpoint}: ${(await health(config, 500)) ? "up" : "down"}`) +
-          ` (asks at risk >= ${classifier.askAbove})${extra.length ? `, extra questions: ${extra.join(", ")}` : ""}`;
-      } else where = "no decider while the config file is ignored: what one would judge asks you";
+          ` (asks at risk >= ${classifier.askAbove}${passes(stage, i)})${extra.length ? `, extra questions: ${extra.join(", ")}` : ""}`
+        );
+      };
+      const where = config.decider.length
+        ? (await Promise.all(config.decider.map(describe))).map((text, i) => (config.decider.length > 1 ? `${i + 1}. ${text}` : text)).join("\n")
+        : "no decider: what one would judge asks you";
       const headless = config.withoutUi.rules;
       ctx.ui.notify(
         [
