@@ -344,7 +344,7 @@ const { classify } = await import("./index.ts");
   server.close();
 }
 // Provider mode: questions go through Pi's model registry. The registry here is a stand-in that
-// records the request; the real one is exercised by `node bench.mjs` with a provider set.
+// records the request; the real one is exercised by `npm run bench` with a provider set.
 const viaPi = { ...withExtra, classifier: { ...withExtra.classifier, provider: "openrouter", model: "typesafe/jev-1.13" } };
 const piQuestions = buildQuestions(viaPi);
 check("x", { action: piQuestions.risky.type === "bool" && piQuestions.secrets.criteria.true === "Yes" && piQuestions.prod.criteria.false === "No" ? "x" : "bad" }, "provider: yes/no questions become bool with both answers described");
@@ -679,7 +679,7 @@ check("x", { action: !(await headless("bash", { command: "sudo -n true" })) ? "x
 }
 
 // A classifier that runs as a process. This stand-in scores a command 0.9 when it contains
-// "risky" and 0.1 otherwise; LANCET itself is exercised by `node bench.mjs` with
+// "risky" and 0.1 otherwise; LANCET itself is exercised by `npm run bench` with
 // classifier.command set.
 const stub = path.join(process.env.PI_CODING_AGENT_DIR, "stub-classifier.mjs");
 fs.writeFileSync(

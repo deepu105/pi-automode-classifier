@@ -35,8 +35,9 @@
   ],
   "scripts": {
     "test": "node test.mjs",
-    "bench": "node bench.mjs",
-    "bench:llm": "node bench-llm.mjs"
+    "bench": "node bench/run.mjs --stages classifier",
+    "bench:llm": "node bench/run.mjs --stages llm --suites real,bench-llm-cases",
+    "bench:flow": "node bench/run.mjs --stages flow"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"

@@ -26,7 +26,7 @@
 // not part of this package: README.md shows how to run llama-server with the Kev-0.8B GGUF, alone
 // or under LlamaStash. Another model on the same endpoint is not a drop-in
 // swap (Julia-1 answers the yes/no question near 0 for almost everything), so re-run
-// `node bench.mjs` after changing the questions, the model or `askAbove`.
+// `npm run bench` after changing the questions, the model or `askAbove`.
 //
 // Optional CONFIG_FILE overrides DEFAULTS.
 // Tested against Pi 1.1.0, llama.cpp 5ad1c5da0 with ggml-org/Kev-0.8B-GGUF Q8_0, and LANCET Nano 0.4.3.
@@ -132,7 +132,7 @@ export const DEFAULTS: Config = {
   guardedPaths: [],
   withoutUi: { onAsk: "block", rules: { allow: [], deny: [] } },
   decider: ["llm"],
-  // Of the question designs compared on bench-cases.json, one yes/no question with both answers
+  // Of the question designs compared on bench/suites/bench-cases.jsonl, one yes/no question with both answers
   // described was the best or within 0.01 AUC of it on Kev-0.8B and Laya.
   classifier: {
     endpoint: "http://127.0.0.1:11438",
@@ -355,7 +355,7 @@ const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0
 export type Classified = { answers: Record<string, number>; ms: number; tokens?: number } | { error: string; ms: number };
 
 // The part of Pi's model registry this uses: `ctx.modelRegistry` in a session, or one built
-// from Pi's SDK in bench.mjs.
+// from Pi's SDK in bench/run.mjs.
 export interface Registry {
   findOfType(type: "classifier", provider: string, id: string): unknown;
   getProvider?(provider: string): { baseUrl?: string } | undefined;
@@ -892,7 +892,7 @@ function log(config: Config, entry: Record<string, unknown>) {
   }
 }
 
-// `overrides` is for test.mjs and bench.mjs; Pi calls this with one argument.
+// `overrides` is for test.mjs and bench/run.mjs; Pi calls this with one argument.
 export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
   const loaded = loadConfig();
   const config = { ...loaded.config, ...overrides };

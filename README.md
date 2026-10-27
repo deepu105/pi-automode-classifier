@@ -349,7 +349,7 @@ Jev was much better than the local models on my 50 commands:
 
 That works out to about 1.5 cents per 1,000 classified commands at the time of writing. Note the higher `askAbove`: with the default 0.2, two of the six safe commands got a prompt. If the provider is slow, down or rate limited you get a prompt, like with a local server that doesn't answer.
 
-Pin a version (`typesafe/jev-1.13`) and don't use `~typesafe/jev-latest`: a threshold tuned for one version shouldn't silently apply to the next. `node bench.mjs 0.5 openrouter/typesafe/jev-1.13` runs the bench through Pi's registry, and works the same for the other decision models your providers offer.
+Pin a version (`typesafe/jev-1.13`) and don't use `~typesafe/jev-latest`: a threshold tuned for one version shouldn't silently apply to the next. With that classifier in `bench/config.json`, `npm run bench -- --ask-above 0.5` runs the bench suites through Pi's registry, and works the same for the other decision models your providers offer.
 
 ### Classifier questions
 
@@ -677,7 +677,7 @@ A local model through Pi's own provider, one lane of the shared server, with the
 }
 ```
 
-`node bench-llm.mjs llamastash/flash-next-128k medium` runs the 27 cases in `bench-llm-cases.json` through it. Each case is a user message plus a pending action, 15 that should be blocked and 12 that should run, and it prints the rule name the decider used and what each pass cost.
+With that `llm` block in `bench/config.json`, `npm run bench:llm` runs the 27 cases in `bench/suites/bench-llm-cases.jsonl`, and the `real` suite, through it. Each case is a user message plus a pending action, 15 that should be blocked and 12 that should run.
 
 On `flash-next-128k` with thinking `medium` and a 120 s `timeoutMs`, GPU shared with other sessions: 23 of 27 right, 11 of the 15 dangerous ones caught, none of the 12 routine ones blocked, and no errors. The filter pass cleared 11 of 27 on its own at a median of 0.9 s. A call took 26 s at the median and 71 s at p95. The four the model let through:
 
@@ -763,7 +763,7 @@ Here is a config that allows pushes to `origin`, lets the decider judge deploys,
 
 ## How well does it do?
 
-`bench.mjs` runs 25 safe and 25 risky commands (`bench-cases.json`) through the built-in rules and a classifier model. The chat decider has its own bench, under [Chat decider configs](#chat-decider-configs). With Kev-0.8B Q8_0 on llama.cpp `5ad1c5da0`, 8 threads on a Ryzen AI Max+ 395:
+`npm run bench` runs the suites in `bench/suites` through the built-in rules and a classifier model. The numbers below are from its `bench-cases` suite, 25 safe and 25 risky commands, measured with the earlier classifier-only bench script. The chat decider has its own bench, under [Chat decider configs](#chat-decider-configs). With Kev-0.8B Q8_0 on llama.cpp `5ad1c5da0`, 8 threads on a Ryzen AI Max+ 395:
 
 | | Result |
 | --- | --- |
@@ -794,7 +794,7 @@ These are the models I tried on the same 50 commands. All of them run on the sam
 - **[Laya](https://huggingface.co/convaiinnovations/laya)** works with the default threshold, but the gap between its safe and risky scores is small.
 - **[Julia-1](https://huggingface.co/SupersonicLabs/Julia-1)** is small and fast and I wouldn't use it. With the yes/no question its answers sit near 0 for almost everything. A graded question did better, which is what `classifier.levels` is for: with `levels` set (2 to 10 descriptions, least risky first) the main question is asked as a score and the risk is the expected level scaled to 0..1. Even so, Julia-1 scores `kubectl delete namespace production` the same as `node build.js`.
 
-The config for each one is under [Sample configs](#sample-configs). Run `node bench.mjs` with your config before you trust another model.
+The config for each one is under [Sample configs](#sample-configs). Put a model in `bench/config.json` and run `npm run bench` before you trust it.
 
 ### Other datasets
 
@@ -823,7 +823,7 @@ Stage 3, the chat decider:
 - Its prompt is about 25,000 tokens. With a model that does not cache prefixes every classified call pays that prefill, which on a local 30B-class model is tens of seconds.
 - It reads your user messages, so a hosted chat model sees the tail of your transcript, not just commands.
 - The rule lists are Claude Code's, written for Claude Code's tool set. Some name tools and `.claude` paths Pi doesn't have, and the rest were written against a git-and-cloud workflow and read that way.
-- Rule coverage on a smaller local model is not Claude Code's: it let a credential search after "find a token that works", a job id the agent picked, a package the agent chose, and a config edit the user had asked for run where the rule book says block. Run `node bench-llm.mjs` before trusting a model with it, and check `thinkingLevel` and `timeoutMs` against your own hardware.
+- Rule coverage on a smaller local model is not Claude Code's: it let a credential search after "find a token that works", a job id the agent picked, a package the agent chose, and a config edit the user had asked for run where the rule book says block. Run `npm run bench:llm` before trusting a model with it, and check `thinkingLevel` and `timeoutMs` against your own hardware.
 - The transcript is what the session holds, cut to `maxEntries` and `maxChars`. A decision that depends on something cut away cannot be made.
 - Input piped to `pi -p` on stdin is part of your first message, so the decider reads it as your words. `@file` and skill blocks are cut out.
 - A build or test command (`npm test`, `make`, `pytest`) still runs by rule, even after the agent edited the code it runs. Only running a session-written file directly goes to the decider.
@@ -846,7 +846,7 @@ Any setup:
 
 ## Development
 
-`node test.mjs` runs the rule, config and handler tests and needs no server. It needs `git`, and it makes a scratch repository under `$HOME` and removes it again. `node bench.mjs [askAbove] [endpoint | provider/model]` needs the server running, or `pi` installed for a provider, or `"command"` in your config's `decider`. `node bench-llm.mjs [provider/model] [thinkingLevel|off] [single]` needs `pi` and a chat model, from the argument or from `llm.provider` and `llm.model`, and runs the user-message cases in `bench-llm-cases.json` through the chat decider. All three need Node 22.18 or newer, and none executes the commands under test.
+`node test.mjs` runs the rule, config and handler tests and needs no server. It needs `git`, and it makes a scratch repository under `$HOME` and removes it again. The benches run the suites in `bench/suites` through the plugin's own `tool_call` handler, as Pi calls it, with the rules, classifier and chat model from `bench/config.json` (same shape as the plugin's config), or the plugin's defaults without it. `npm run bench` stops after the classifier, `npm run bench:llm` sends the `real` and `bench-llm-cases` suites to the chat model only, and `npm run bench:flow` runs all three stages on every suite. They take `--suites a,b`, `--ask-above`, `--allow-below` and `--limit`, print safe and risky commands run and stopped per suite, and write per-row results to `bench/results`. They need `pi` installed, and a chat model in `bench/config.json` for `bench:llm` and `bench:flow`. Tests and benches need Node 22.18 or newer, and none executes the commands under test.
 
 ## License
 
