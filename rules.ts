@@ -131,6 +131,8 @@ export interface Scope {
   chatDecider?: boolean;
   // Shell variables the command set to a known path before this point.
   vars?: Map<string, string>;
+  // Variables of a `for` loop over literal words, so they only ever hold one of those words.
+  loopVars?: Set<string>;
 }
 
 const expandHome = (p: string) => (p === "~" || p.startsWith("~/") ? HOME + p.slice(1) : p);
@@ -836,9 +838,12 @@ function network(cmd: string, args: string[], scope: Scope): Verdict {
   } else if (args.some((a) => /^--(post|body|method)/.test(a))) {
     return ask("wget sends data to a remote host");
   }
-  // A URL or header built from a variable or a substitution can carry local data out.
-  if (args.some((a) => /[$`]/.test(a))) return ask(`${cmd} request built from local data`);
   const curl = cmd === "curl";
+  // A URL or header built from a variable or a substitution can carry local data out. The name
+  // of the file it saves to stays local.
+  const outFlags = curl ? ["-o", "--output"] : ["-O", "--output-document", "-o", "--output-file"];
+  const literal = (a: string) => a.replace(/\$\{(\w+)\}|\$(\w+)/g, (m, x, y) => (scope.loopVars?.has(x ?? y) ? "" : m));
+  if (args.some((a, i) => /[$`]/.test(literal(a)) && !outFlags.includes(args[i - 1]))) return ask(`${cmd} request built from local data`);
   const opts = optionValues(args, curl ? "AbcCdDeEFHKmoPQrtTuUwxXyYz" : "aABDeiIlOoPQRtTUwX", [...DOWNLOAD_FILES[cmd].other, ...DOWNLOAD_FILES[cmd].saved, DOWNLOAD_FILES[cmd].dir].flat());
   const values = (flags: string[]) => opts.filter(([flag]) => flags.includes(flag)).map(([, value]) => value ?? "");
   const writes = (file: string) => {
@@ -1143,7 +1148,7 @@ function assignments(argv: string[]): [string, string][] | undefined {
 function evaluateParsed(parsed: Parsed, scope: Scope, depth: number): Verdict {
   let verdict: Verdict = parsed.opaque ? classify("shell syntax the rules do not model") : ALLOW;
   // Relative paths are only trusted while the working directory is known.
-  const local: Scope = { ...scope, vars: new Map() };
+  const local: Scope = { ...scope, vars: new Map(), loopVars: new Set() };
   const hasCd = parsed.cmds.some((c) => ["cd", "pushd", "popd"].includes(c.argv[0]));
   if (hasCd && parsed.grouped) local.cwd = undefined;
   // A variable is followed only when the command names it once, in the assignment, and at the
@@ -1155,6 +1160,8 @@ function evaluateParsed(parsed: Parsed, scope: Scope, depth: number): Verdict {
   // The patterns of the parts that decide. A prompt offers one only when it covers them all.
   const patterns = new Set<string | undefined>(parsed.opaque ? [undefined] : []);
   for (const cmd of parsed.cmds) {
+    const [kw, name, inKw, ...values] = cmd.argv;
+    if (track && kw === "for" && inKw === "in" && values.every((w) => /^[\w./@:+-]+$/.test(w)) && namedOnce(name)) local.loopVars!.add(name);
     const part = simple(cmd, local, depth);
     if (part.action === "classify" || part.action === "ask") patterns.add(part.pattern);
     verdict = worst(verdict, part);
