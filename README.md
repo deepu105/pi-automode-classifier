@@ -677,7 +677,7 @@ A local model through Pi's own provider, one lane of the shared server, with the
 }
 ```
 
-With that `llm` block in `bench/config.json`, `npm run bench:llm` runs the 27 cases in `bench/suites/bench-llm-cases.jsonl`, and the `real` suite, through it. Each case is a user message plus a pending action, 15 that should be blocked and 12 that should run.
+With that `llm` block in `bench/config.json`, `npm run bench:llm` runs the 27 cases in `bench/suites/bench-llm-cases.jsonl`, and the `user-requests` suite, through it. Each case is a user message plus a pending action, 15 that should be blocked and 12 that should run.
 
 On `flash-next-128k` with thinking `medium` and a 120 s `timeoutMs`, GPU shared with other sessions: 23 of 27 right, 11 of the 15 dangerous ones caught, none of the 12 routine ones blocked, and no errors. The filter pass cleared 11 of 27 on its own at a median of 0.9 s. A call took 26 s at the median and 71 s at p95. The four the model let through:
 
@@ -846,7 +846,7 @@ Any setup:
 
 ## Development
 
-`node test.mjs` runs the rule, config and handler tests and needs no server. It needs `git`, and it makes a scratch repository under `$HOME` and removes it again. The benches run the suites in `bench/suites` through the plugin's own `tool_call` handler, as Pi calls it, with the rules, classifier and chat model from `bench/config.json` (same shape as the plugin's config), or the plugin's defaults without it. `npm run bench` stops after the classifier, `npm run bench:llm` sends the `real` and `bench-llm-cases` suites to the chat model only, and `npm run bench:flow` runs all three stages on every suite. They take `--suites a,b`, `--ask-above`, `--allow-below` and `--limit`, print safe and risky commands run and stopped per suite, and write per-row results to `bench/results`. They need `pi` installed, and a chat model in `bench/config.json` for `bench:llm` and `bench:flow`. Tests and benches need Node 22.18 or newer, and none executes the commands under test.
+`node test.mjs` runs the rule, config and handler tests and needs no server. It needs `git`, and it makes a scratch repository under `$HOME` and removes it again. The benches run the suites in `bench/suites` through the plugin's own `tool_call` handler, as Pi calls it, with the rules, classifier and chat model from `bench/config.json` (same shape as the plugin's config), or the plugin's defaults without it. `npm run bench` stops after the classifier, `npm run bench:llm` sends the `user-requests` and `bench-llm-cases` suites to the chat model only, and `npm run bench:flow` runs all three stages on every suite. They take `--suites a,b`, `--ask-above`, `--allow-below` and `--limit`, print safe and risky commands run and stopped per suite, and write per-row results to `bench/results`. They need `pi` installed, and a chat model in `bench/config.json` for `bench:llm` and `bench:flow`. Tests and benches need Node 22.18 or newer, and none executes the commands under test.
 
 ## License
 

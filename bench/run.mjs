@@ -8,6 +8,7 @@
 //   classifier  the config's classifier stages (npm run bench)
 //   llm         the chat model only (npm run bench:llm)
 //   flow        the classifier stages, then the chat model (npm run bench:flow)
+//   rules       no deciders: what the rules leave open asks you
 //
 // Rows: {id, command | path, label (1 = risky), tool?, cwd?, user?, prior?: [{tool, input}]}. In
 // command, path and cwd, {home} is $HOME, {project} a scratch git repository under ~/.cache, and
@@ -15,7 +16,7 @@
 // one line per row, and a rerun skips the rows already there.
 // Needs a Node that runs TypeScript directly (22.18 or newer) and `pi` installed.
 // Usage: node bench/run.mjs [--stages flow] [--suites a,b] [--ask-above 0.5] [--allow-below 0.2] [--limit n]
-//   npm run bench:flow -- --suites real --ask-above 0.8
+//   npm run bench:flow -- --suites user-requests --ask-above 0.8
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -27,7 +28,7 @@ const guard = path.dirname(here);
 const { values: args } = parseArgs({
   options: { stages: { type: "string", default: "flow" }, suites: { type: "string" }, "ask-above": { type: "string" }, "allow-below": { type: "string" }, limit: { type: "string" } },
 });
-if (!["classifier", "llm", "flow"].includes(args.stages)) throw new Error(`--stages must be classifier, llm or flow, not ${args.stages}`);
+if (!["classifier", "llm", "flow", "rules"].includes(args.stages)) throw new Error(`--stages must be classifier, llm, flow or rules, not ${args.stages}`);
 
 // LOG_FILE is read when index.ts loads, so the bench's log folder is set first. One per process,
 // so parallel runs do not read each other's decisions.
@@ -39,7 +40,7 @@ if (loaded.error) console.error(loaded.error);
 const base = loaded.config;
 const scorers = base.decider.filter((d) => d !== "llm");
 if (!scorers.length) scorers.push("classifier");
-const decider = { classifier: scorers, llm: ["llm"], flow: [...scorers, "llm"] }[args.stages];
+const decider = { classifier: scorers, llm: ["llm"], flow: [...scorers, "llm"], rules: [] }[args.stages];
 if (decider.includes("llm") && !base.llm.provider && !base.llm.model) {
   console.error(`The chat model defaults to the Pi session's model, and a bench has no session. Set llm.provider and llm.model in ${configFile}.`);
   process.exit(1);
@@ -47,7 +48,7 @@ if (decider.includes("llm") && !base.llm.provider && !base.llm.model) {
 const askAbove = Number(args["ask-above"] ?? base[scorers[0]].askAbove);
 const allowBelow = Number(args["allow-below"] ?? base[scorers[0]].allowBelow);
 const config = { ...base, log: true, decider, ...Object.fromEntries(scorers.map((s) => [s, { ...base[s], askAbove, allowBelow }])) };
-const out = path.join(here, "results", args.stages === "llm" ? "llm" : `${args.stages}-${askAbove}-${allowBelow}`);
+const out = path.join(here, "results", ["llm", "rules"].includes(args.stages) ? args.stages : `${args.stages}-${askAbove}-${allowBelow}`);
 fs.mkdirSync(out, { recursive: true });
 
 const pi = await import("@earendil-works/pi-coding-agent").catch(() => {
@@ -78,7 +79,7 @@ const logSince = (offset) => {
 };
 const totals = [];
 
-console.log(`stages: rules > ${decider.join(" > ")}, allowBelow ${allowBelow}, askAbove ${askAbove}, config: ${fs.existsSync(configFile) ? configFile : "plugin defaults"}`);
+console.log(`stages: ${["rules", ...decider].join(" > ")}, allowBelow ${allowBelow}, askAbove ${askAbove}, config: ${fs.existsSync(configFile) ? configFile : "plugin defaults"}`);
 for (const name of names) {
   const rows = fs.readFileSync(path.join(here, "suites", `${name}.jsonl`), "utf8").trim().split("\n").map((l) => JSON.parse(l));
   const file = path.join(out, `${name}.jsonl`);

@@ -36,7 +36,7 @@
   "scripts": {
     "test": "node test.mjs",
     "bench": "node bench/run.mjs --stages classifier",
-    "bench:llm": "node bench/run.mjs --stages llm --suites real,bench-llm-cases",
+    "bench:llm": "node bench/run.mjs --stages llm --suites user-requests,bench-llm-cases",
     "bench:flow": "node bench/run.mjs --stages flow"
   },
   "peerDependencies": {
