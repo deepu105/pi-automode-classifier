@@ -40,7 +40,7 @@ export interface Verdict {
   // folder a "for this session" permission would cover.
   dir?: string;
   // Set when one command decides the verdict: an allow pattern for it that the confirm prompt
-  // can offer for the session.
+  // can offer, for the session and, unless fromAsk, in the config file too.
   pattern?: string;
   // The pattern came from an ask, so it is offered for the session only, never saved.
   fromAsk?: boolean;
@@ -979,10 +979,12 @@ function simple(cmd: Simple, scope: Scope, depth = 0): Verdict {
   const out = redirects(cmd, scope);
   if (out.action === "deny") return out;
   let builtin = command(cmd, scope, depth);
-  // An ask the user can allow for the session as a pattern, so the next call like it does not ask.
-  if (builtin.action === "ask" && !builtin.locked && !builtin.firm && !builtin.pattern && !("dir" in builtin)) {
+  // The pattern a confirm prompt offers, so the next call like it does not ask. An ask gets one
+  // that is offered for the session only; a call the rules leave to a decider gets one that can
+  // also be saved, because there the command itself is what decided, and the model only scored it.
+  if (!builtin.locked && !builtin.firm && !builtin.pattern && !("dir" in builtin)) {
     const pattern = askPattern(unwrap(cmd.argv));
-    if (pattern) builtin = { ...builtin, pattern, fromAsk: true };
+    if (pattern) builtin = { ...builtin, pattern, ...(builtin.action === "ask" ? { fromAsk: true } : {}) };
   }
   if (builtin.action === "deny" || builtin.locked) return worst(out, builtin);
   const mine = scope.rules && userVerdict(cmd.argv, scope.rules);
@@ -1117,9 +1119,21 @@ function command(cmd: Simple, scope: Scope, depth: number): Verdict {
 // operand, for root, for `gh api`, and for programs whose arguments are what they send: the
 // pattern would cover the next call's flags and files too, such as `curl -sS -d @.env`.
 const NO_ASK_PATTERN = new Set(["sudo", "doas", "curl", "wget", "scp", "rsync", "sftp", "ftp", "nc", "ncat", "netcat", "socat", "ssh", "telnet", "http", "https", "xh", "rclone"]);
+// A word that names a file: it has a slash, or starts with `~` or `.`. Quotes, spaces and shell
+// characters are left out, so a pattern is something the matcher can read back literally.
+const FILE_WORD = /^[\w.~+-]*(?:\/[\w.~+-]*)+$/;
+const invokedByPath = (word: string) => FILE_WORD.test(word) || /^[~.]$/.test(word);
+
+// The pattern a confirm prompt offers for a command that asks: `git config remote *` for a
+// subcommand, `bash ./wait.sh *` for a script, `./build.sh *` for a program of its own. Nothing
+// for programs whose arguments are what they send, and nothing for inline code.
 function askPattern(argv: string[]): string | undefined {
   const [program, sub = "", next = ""] = argv;
-  if (!/^[\w.+-]+$/.test(program ?? "") || NO_ASK_PATTERN.has(program) || !/^[a-z][\w-]*$/.test(sub)) return undefined;
+  if (!program || NO_ASK_PATTERN.has(program)) return undefined;
+  if (invokedByPath(program)) return FILE_WORD.test(program) ? `${program} *` : undefined;
+  if (!/^[\w.+-]+$/.test(program)) return undefined;
+  if (sub && FILE_WORD.test(sub)) return `${program} ${sub} *`;
+  if (!/^[a-z][\w-]*$/.test(sub)) return undefined;
   if (program === "gh" && sub === "api") return undefined;
   const third = program === "gh" ? /^[a-z][\w-]*$/.test(next) : program === "git" && ["config", "remote"].includes(sub) && /^(--)?[a-z][\w-]*$/.test(next);
   return `${program} ${sub}${third ? ` ${next}` : ""} *`;

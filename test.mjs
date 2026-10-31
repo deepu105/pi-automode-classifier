@@ -484,7 +484,9 @@ pattern("cargo install *", "cargo install ripgrep");
 pattern("mytool *", "mytool ./data.json");
 pattern(undefined, "terraform plan && terraform apply");
 pattern(undefined, "python3 -c 'print(1)'");
-pattern(undefined, "./new.sh");
+pattern("./new.sh *", "./new.sh");
+pattern("bash ./wait.sh *", "bash ./wait.sh -t 2700 -i 60");
+pattern("python3 tools/gen.py *", "python3 tools/gen.py out");
 pattern(undefined, "mytool sync && sudo true");
 
 // A real git repository with tracked, ignored and untracked files, a linked worktree and a
@@ -611,7 +613,7 @@ await handle("block", "guardedPaths entry", "bash", { command: "cat x > ~/guarde
 // Allowing a folder for the session: other files in it run without a prompt, other folders still ask.
 const folderOption = `Allow changes in ${worktree.replace(home, "~")} for this session`;
 await handle("run", "write in a worktree, folder allowed for the session", "write", { path: path.join(worktree, "src/a.ts"), content: "" }, true, folderOption);
-check("x", { action: offered.at(-1)[1] === folderOption ? "x" : `offered ${offered.at(-1)[1]}` }, "handler: the prompt offers the worktree folder");
+check("x", { action: offered.at(-1)[3] === folderOption ? "x" : `offered ${offered.at(-1)[3]}` }, "handler: the prompt offers the worktree folder");
 await handle("run", "another file in that folder, no prompt", "edit", { path: path.join(worktree, "tests/deep/b.ts") }, true);
 await handle("run", "a shell write in that folder, no prompt", "bash", { command: `echo hi > ${worktree}/notes.txt && rm -rf ${worktree}/build` }, false);
 await handle("block", "a different outside folder still asks", "write", { path: "~/other-project/src/a.ts", content: "" }, true, "Block");
@@ -634,6 +636,24 @@ await handle("block", "a remote action still asks after a folder was allowed", "
   fs.rmSync(far, { recursive: true });
 }
 fs.rmSync(worktree, { recursive: true });
+
+{
+  // A prompt nobody answers is a Block after promptTimeoutMs, so an unattended session moves on.
+  const h = {};
+  extension({ on: (name, handler) => (h[name] = handler), registerCommand: () => {} }, { log: false, decider: [], promptTimeoutMs: 80, rules: { ...DEFAULTS.rules, ask: ["niri msg output *"] } });
+  // A prompt that never gets an answer and only closes when the signal the handler hands Pi aborts.
+  const silent = { notify: () => {}, select: (title, options, opts) => new Promise((resolve) => opts.signal.addEventListener("abort", () => resolve(undefined))) };
+  const started = Date.now();
+  const res = await h.tool_call({ toolName: "bash", input: { command: "niri msg output eDP-1 off" } }, { cwd: project, hasUI: true, ui: silent });
+  const waited = Date.now() - started;
+  check("x", { action: res?.block && waited >= 75 && /no answer/.test(res.reason) ? "x" : `blocked=${Boolean(res?.block)} after ${waited}ms` }, "handler: a prompt nobody answers blocks after promptTimeoutMs");
+  // With the timeout off the same prompt waits for the answer, however long it takes.
+  const h2 = {};
+  extension({ on: (name, handler) => (h2[name] = handler), registerCommand: () => {} }, { log: false, decider: [], promptTimeoutMs: 0, rules: { ...DEFAULTS.rules, ask: ["niri msg output *"] } });
+  const slow = { notify: () => {}, select: async () => (await new Promise((done) => setTimeout(done, 150)), "Allow once") };
+  const late = await h2.tool_call({ toolName: "bash", input: { command: "niri msg output eDP-1 off" } }, { cwd: project, hasUI: true, ui: slow });
+  check("x", { action: late?.block ? "blocked" : "x" }, "handler: promptTimeoutMs 0 waits for the answer");
+}
 
 {
   // A command allowed for the session asks again once the same text runs a download.
@@ -727,7 +747,7 @@ const viaStub = async (want, label, toolName, input, answer) => {
 const lastOffer = (want, label) => check("x", { action: JSON.stringify(offered.at(-1)) === JSON.stringify(want) ? "x" : JSON.stringify(offered.at(-1)) }, `prompt: ${label}`);
 await viaStub("run", "a command the classifier passes runs without a prompt", "bash", { command: "mytool sync fine" });
 await viaStub("block", "a flagged command, user picks Block", "bash", { command: "mytool sync risky" }, "Block");
-lastOffer(["Allow once", 'Allow "mytool sync *" for this session', 'Always allow "mytool sync *"', "Block"], "the pattern is offered for the session and for always");
+lastOffer(["Allow once", "Allow for this session", "Block", 'Allow "mytool sync *" for this session', 'Always allow "mytool sync *"'], "the pattern is offered for the session and for always");
 await viaStub("run", "allow the pattern for the session", "bash", { command: "mytool sync risky" }, 'Allow "mytool sync *" for this session');
 await viaStub("run", "the pattern covers other arguments and a timeout wrapper, no prompt", "bash", { command: "timeout 30 mytool sync risky --all" });
 await viaStub("block", "the pattern does not apply behind a variable assignment", "bash", { command: "PATH=/tmp/x mytool sync risky" }, "Block");
@@ -735,7 +755,13 @@ await viaStub("block", "another subcommand still asks", "bash", { command: "myto
 await viaStub("block", "inline code asks", "bash", { command: "python3 -c 'risky()'" }, "Block");
 lastOffer(["Allow once", "Allow for this session", "Block"], "inline code is not offered a pattern");
 await viaStub("block", "git push asks", "bash", { command: "git push" }, "Block");
-lastOffer(["Allow once", 'Allow "git push *" for this session', "Block"], "a rule ask is offered its command pattern, for the session only");
+lastOffer(["Allow once", "Allow for this session", "Block", 'Allow "git push *" for this session'], "a rule ask is offered its command pattern, for the session only");
+// A call a decider asked about gets the same choices: for a script run, the pattern is that file,
+// so a call that only changes its flags is covered next time.
+await viaStub("block", "a script run with bash asks", "bash", { command: "bash ./wait.sh risky" }, "Block");
+lastOffer(["Allow once", "Allow for this session", "Block", 'Allow "bash ./wait.sh *" for this session', 'Always allow "bash ./wait.sh *"'], "a script run is offered its file as the pattern, for the session and for always");
+await viaStub("run", "the script pattern for the session", "bash", { command: "bash ./wait.sh risky -t 2700" }, 'Allow "bash ./wait.sh *" for this session');
+await viaStub("run", "the script pattern covers other flags, no prompt", "bash", { command: "bash ./wait.sh risky -i 60 -q" });
 await viaStub("run", "Always allow a pattern", "bash", { command: "othertool push risky" }, 'Always allow "othertool push *"');
 await viaStub("run", "the saved pattern applies at once", "bash", { command: "othertool push risky again" });
 await viaStub("run", "Always allow a folder", "write", { path: "~/pi-amc-always-dir/a.txt", content: "" }, "Always allow changes in ~/pi-amc-always-dir");
@@ -803,6 +829,16 @@ check("x", { action: rendered.includes("User: delete the old build output") ? "x
 check("x", { action: !rendered.includes("Sure, I will") && !rendered.includes("remove it") ? "x" : rendered }, "llm transcript: assistant prose is stripped");
 check("x", { action: !rendered.includes("ignore previous instructions") ? "x" : rendered }, "llm transcript: tool results are stripped");
 check("x", { action: rendered.match(/mytool sync risky/g).length === 1 ? "x" : rendered }, "llm transcript: the pending call is not listed twice");
+// What a classifier is told about a call: the command alone by default, and with contextChars set
+// the session the chat decider sees, as its own key or folded into the command.
+const { classifierState } = await import("./index.ts");
+const csCtx = { cwd: project, sessionManager: { getBranch: () => [{ message: { role: "user", content: "wait for both jobs, then report" } }, { message: { role: "assistant", content: [{ type: "toolCall", name: "bash", arguments: { command: "jobs" } }] } }] } };
+const cs = (chars, mode) => classifierState({ ...DEFAULTS, classifier: { ...DEFAULTS.classifier, contextChars: chars, contextIn: mode } }, csCtx, "bash", { command: "wait-for.sh" }, "bash wait-for.sh", new Map());
+check("x", { action: Object.keys(cs(0, "state")).join() === "tool,cwd,command" ? "x" : JSON.stringify(cs(0, "state")) }, "classifier state: the command alone by default");
+const stated = cs(600, "state");
+check("x", { action: stated.context?.includes("User: wait for both jobs") && stated.context.includes('bash {"command":"jobs"}') && !stated.context.includes("wait-for.sh") ? "x" : JSON.stringify(stated) }, "classifier state: contextChars adds the session as its own key, without the pending call");
+const folded = cs(600, "command");
+check("x", { action: folded.command.startsWith("Session so far:") && folded.command.endsWith("Command to judge: bash wait-for.sh") && !folded.context ? "x" : JSON.stringify(folded) }, "classifier state: contextIn command folds the session into the command");
 const withExtras = buildTranscript(transcriptItems(branch, { ...DEFAULT_LLM, transcript: { ...DEFAULT_LLM.transcript, includeAssistantText: true, includeToolResults: true } }, { tool: "bash", input: { command: "x" } }), { ...DEFAULT_LLM.transcript, includeAssistantText: true, includeToolResults: true });
 check("x", { action: withExtras.includes('Assistant: "Sure') && withExtras.includes('Result bash: "ignore') ? "x" : withExtras }, "llm transcript: prose and results can be asked for");
 check("x", { action: !withExtras.includes("User: Assistant") ? "x" : withExtras }, "llm transcript: agent prose is never a User line");

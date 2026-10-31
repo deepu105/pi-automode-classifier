@@ -89,6 +89,13 @@ export interface ClassifierConfig {
   // More questions, by id. A string is a bare question. Each one adds about one model call
   // of latency, and a yes at or above its threshold gets a prompt.
   extraQuestions: Record<string, string | Question>;
+  // How much of the session a classifier is told about, in characters: the last user message and
+  // the calls before this one, as the chat decider sees them. 0: the command alone.
+  contextChars: number;
+  // Where that goes. "state" sends it beside the command as its own `context` key, which a
+  // free-form server such as Jev reads. "command" folds it into the command text, which is the
+  // only way a server that reads just the command, like llama.cpp's or LANCET's, can see it.
+  contextIn: "state" | "command";
 }
 
 export interface Config {
@@ -104,6 +111,9 @@ export interface Config {
   // More files or directories that count as the guard's own (changes to them always ask),
   // for example the server's unit file. `~` is expanded.
   guardedPaths: string[];
+  // A confirm prompt nobody answers counts as a Block after this long, so an unattended session
+  // does not stop there forever. 0 waits forever.
+  promptTimeoutMs: number;
   withoutUi: {
     // What happens to a call that needs a prompt when there is no UI to show it.
     onAsk: "block" | "allow";
@@ -130,6 +140,7 @@ export const DEFAULTS: Config = {
   rules: { deny: [], ask: [], classify: [], allow: [] },
   allowedPaths: [],
   guardedPaths: [],
+  promptTimeoutMs: 60_000,
   withoutUi: { onAsk: "block", rules: { allow: [], deny: [] } },
   decider: ["llm"],
   // Of the question designs compared on bench/suites/bench-cases.jsonl, one yes/no question with both answers
@@ -147,6 +158,8 @@ export const DEFAULTS: Config = {
     safe: "Routine development work that only reads, builds, tests or edits files inside the project directory",
     levels: [],
     extraQuestions: {},
+    contextChars: 0,
+    contextIn: "state",
   },
   llm: DEFAULT_LLM,
   // Picked with LANCET Nano 0.4.3; the README has the numbers.
@@ -165,6 +178,8 @@ const atLeast = (min: number) => (v: unknown) => typeof v === "number" && v >= m
 const oneOf = (...values: string[]) => (v: unknown) => values.includes(v as string);
 // AbortSignal.timeout throws above this.
 const isTimeout = (v: unknown) => typeof v === "number" && v > 0 && v <= 2_147_483_647;
+// A prompt timeout of 0 means no timeout.
+const isTimeoutOrOff = (v: unknown) => v === 0 || isTimeout(v);
 const isQuestion = (v: unknown) =>
   typeof v === "string" ||
   (isObject(v) &&
@@ -186,6 +201,7 @@ const SCHEMA: Schema = {
   rules: { deny: isStrings, ask: isStrings, classify: isStrings, allow: isStrings },
   allowedPaths: isStrings,
   guardedPaths: isStrings,
+  promptTimeoutMs: isTimeoutOrOff,
   withoutUi: { onAsk: oneOf("block", "allow"), rules: { allow: isStrings, deny: isStrings } },
   decider: (v) => isStrings(v) && (v as string[]).every((d) => ["llm", "classifier", "command"].includes(d)) && new Set(v as string[]).size === (v as string[]).length,
   classifier: {
@@ -201,6 +217,8 @@ const SCHEMA: Schema = {
     safe: isString,
     levels: (v) => isStrings(v) && (v as string[]).length !== 1 && (v as string[]).length <= 10,
     extraQuestions: (v) => isObject(v) && Object.entries(v).every(([id, q]) => id !== "risky" && isQuestion(q)),
+    contextChars: atLeast(0),
+    contextIn: oneOf("state", "command"),
   },
   llm: {
     provider: isString,
@@ -351,6 +369,13 @@ export function flagged(config: Config, answers: Record<string, number>, stage =
 }
 
 const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max)} ... (${text.length} chars)` : text);
+// The prompt timeout as text: "30 seconds", "1 minute", "2.5 minutes".
+const afterTimeout = (config: Config) => {
+  const seconds = Math.round(config.promptTimeoutMs / 1000);
+  if (seconds < 60) return `${seconds} second${seconds === 1 ? "" : "s"}`;
+  const minutes = Math.round((seconds / 60) * 10) / 10;
+  return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+};
 
 export type Classified = { answers: Record<string, number>; ms: number; tokens?: number } | { error: string; ms: number };
 
@@ -815,6 +840,33 @@ export const classifierName = (config: Config, stage = firstScorer(config)) =>
       : config.classifier.model;
 
 // The answer of the classifier decider, or of the classifier process for "command".
+// What a classifier is told about a call: the command, and with classifier.contextChars set also
+// what the chat decider gets, shrunk to fit: the user's own message and the calls before this one.
+// `contextIn` "command" folds that text into the command, which is the only way a server that
+// reads just the command can see it; "state" sends it as its own key for a free-form server.
+export function classifierState(
+  config: Config,
+  ctx: ExtensionContext,
+  tool: string,
+  input: unknown,
+  command: string,
+  decided: ReadonlyMap<string, Outcome>,
+): Record<string, string> {
+  const state: Record<string, string> = { tool, cwd: ctx.cwd, command };
+  const chars = config.classifier.contextChars;
+  if (!chars) return state;
+  const branch = (ctx.sessionManager?.getBranch?.() ?? []) as { message?: Record<string, unknown> }[];
+  const items = transcriptItems(branch, config.llm, { tool, input }, decided);
+  // buildTranscript wraps the session and ends with the pending call, which the classifier
+  // already has as its command.
+  const block = buildTranscript(items, { ...config.llm.transcript, maxEntries: 12, maxChars: chars });
+  const context = block.split("\n").slice(1, -2).join("\n");
+  if (!context) return state;
+  if (config.classifier.contextIn === "command") state.command = `Session so far:\n${context}\n\nCommand to judge: ${command}`;
+  else state.context = context;
+  return state;
+}
+
 export async function classify(config: Config, state: Record<string, string>, signal?: AbortSignal, registry?: Registry, stage = firstScorer(config)): Promise<Classified> {
   if (stage === "command") return askClassifierProcess(config, state, signal);
   const started = performance.now();
@@ -1009,7 +1061,7 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
           break;
         }
         const last = i === chain.length - 1;
-        const result = await classify(config, { tool: event.toolName, cwd: ctx.cwd, command: subject }, ctx.signal, ctx.modelRegistry as unknown as Registry, stage);
+        const result = await classify(config, classifierState(config, ctx, event.toolName, input, subject, decided), ctx.signal, ctx.modelRegistry as unknown as Registry, stage);
         steps.push({ decider: stage, model: classifierName(config, stage), ...result });
         entry.steps = steps;
         const risk = "answers" in result ? flagged(config, result.answers, stage) : undefined;
@@ -1110,32 +1162,59 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
     counts.asked++;
     // While the config file is ignored every prompt says so, since the defaults decide differently.
     const title = `Auto mode: allow ${event.toolName}?\n${verdict.reason}\n\n${clip(subject, 1200)}${configError ? `\n\n${configError}` : ""}`;
-    // A change outside the working directory can be allowed for its whole folder, and a command
-    // for its pattern, so the next one does not ask again. A folder and the pattern of a command
-    // the rules do not know can also be saved to the config file.
+    // The same choices whatever asked: this call once, this exact call for the session, Block,
+    // and then the wider one, for a command's pattern or a folder outside the working directory.
+    // The wider choice can also be saved to the config file, except a pattern that came from an
+    // ask: that one is the ask itself, so it is offered for the session only.
     const dir = verdict.dir?.replace(HOME, "~");
     const covers = dir ? `changes in ${dir}` : verdict.pattern ? `"${verdict.pattern}"` : undefined;
-    const forSession = covers ? `Allow ${covers} for this session` : "Allow for this session";
-    const always = covers && !(verdict.pattern && verdict.fromAsk) ? `Always allow ${covers}` : undefined;
-    const answer = prompts.then(() => ctx.ui.select(title, ["Allow once", forSession, ...(always ? [always] : []), "Block"], { signal: ctx.signal }));
+    const wider = covers ? `Allow ${covers} for this session` : undefined;
+    const always = covers && !verdict.fromAsk ? `Always allow ${covers}` : undefined;
+    const choices = ["Allow once", "Allow for this session", "Block", ...(wider ? [wider] : []), ...(always ? [always] : [])];
+    // An unattended session would sit here until someone answers, so a prompt nobody answers in
+    // `promptTimeoutMs` counts as a Block. Pi's own `timeout` draws the countdown and dismisses
+    // the dialog; this signal is what tells a timeout from a dismiss, since both leave no answer.
+    let timedOut = false;
+    const answer = prompts.then(() => {
+      if (!config.promptTimeoutMs) return ctx.ui.select(title, choices, { signal: ctx.signal });
+      const controller = new AbortController();
+      ctx.signal?.addEventListener("abort", () => controller.abort(), { once: true });
+      const timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, config.promptTimeoutMs);
+      return ctx.ui.select(title, choices, { signal: controller.signal, timeout: config.promptTimeoutMs }).finally(() => clearTimeout(timer));
+    });
     prompts = answer.catch(() => undefined);
     const choice = await answer;
-    const wider = choice === forSession || (always !== undefined && choice === always);
-    if (wider) {
-      if (verdict.dir) allowedPaths.push(verdict.dir);
-      else if (verdict.pattern && choice === always) {
-        allowPatterns.push(verdict.pattern);
-        rules = compile();
-      } else if (verdict.pattern) {
-        picked.push(verdict.pattern);
-        pickedRules = compileRules({ allow: picked }).allow;
-      } else sessionAllowed.add(key);
+    if (timedOut) {
+      counts.blocked++;
+      // To the decider this reads as a call nobody approved, which is how it should be treated.
+      held("rejected-by-user");
+      finish("block", "timeout");
+      if (ctx.hasUI) ctx.ui.notify(`Auto mode blocked ${event.toolName}: no answer in ${afterTimeout(config)}`, "warning");
+      return { block: true, reason: `The confirm prompt got no answer in ${afterTimeout(config)}, so it was treated as a block. Do not retry it or work around it. Tell the user and ask how to proceed.` };
     }
-    if (always !== undefined && choice === always) {
+    // A dismissed prompt leaves no choice, which is neither of the two wider ones even when
+    // nothing wider could be offered, so the absent choice is ruled out first.
+    const took = choice !== undefined && (choice === wider || choice === always);
+    if (took) {
+      if (verdict.dir) allowedPaths.push(verdict.dir);
+      else if (choice === always) {
+        allowPatterns.push(verdict.pattern!);
+        rules = compile();
+      } else {
+        picked.push(verdict.pattern!);
+        pickedRules = compileRules({ allow: picked }).allow;
+      }
+    }
+    if (choice !== undefined && choice === always) {
       const error = verdict.dir ? saveToConfig("allowedPaths", dir!) : saveToConfig("allow", verdict.pattern!);
       if (error) ctx.ui.notify(`pi-automode-classifier: ${error}`, "warning");
     }
-    if (choice === "Allow once" || wider) {
+    // The exact command text only, which is all there is when nothing wider could be offered.
+    if (choice === "Allow for this session") sessionAllowed.add(key);
+    if (choice === "Allow once" || choice === "Allow for this session" || took) {
       finish("allow", "user");
       return undefined;
     }
@@ -1184,6 +1263,7 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
           where,
           `your rules: ${rules.ui.deny.length} deny, ${rules.ui.ask.length} ask, ${rules.ui.classify.length} classify, ${rules.ui.allow.length} allow; ${allowedPaths.length} allowed paths`,
           `without a UI: asks ${config.withoutUi.onAsk === "allow" ? "run" : "are blocked"}${headless.allow.length || headless.deny.length ? `, plus ${headless.deny.length} deny and ${headless.allow.length} allow rules` : ""}`,
+          `prompts: ${config.promptTimeoutMs ? `block after ${afterTimeout(config)} without an answer` : "wait forever"}`,
           `this session: ${counts.rule} allowed by rule, ${counts.model} by model, ${counts.asked} asked, ${counts.blocked} blocked${denials.total ? `; decider denials ${denials.total} (${denials.consecutive} in a row)` : ""}`,
           `config: ${CONFIG_FILE}${fs.existsSync(CONFIG_FILE) ? "" : " (not present, defaults in use)"}`,
           config.log ? `log: ${LOG_FILE}` : "log: off",

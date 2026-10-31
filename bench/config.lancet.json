@@ -1,0 +1,4 @@
+{
+  "decider": ["classifier"],
+  "classifier": { "provider": "llamastash", "model": "lancet", "timeoutMs": 20000, "askAbove": 0.2, "allowBelow": 0.1 }
+}

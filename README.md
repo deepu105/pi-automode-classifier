@@ -5,7 +5,7 @@ An auto mode plugin for the [Pi](https://pi.dev) coding agent, in the style of [
 | Stage | What judges the call | What it sees | Time per call |
 | --- | --- | --- | --- |
 | 1. Rules | Built-in rules and your own patterns | The parsed command | under 0.1 ms |
-| 2. Classifier, optional | [LANCET](https://github.com/TannerMidd/LANCET-model), [Kev](https://huggingface.co/jaredpalmer/kev-0.8b), [Laya](https://huggingface.co/convaiinnovations/laya-typed-decisions) or [Jev](https://docs.typesafe.ai/api) | The command | 15 ms (LANCET) to 174 ms (Kev) |
+| 2. Classifier, optional | [LANCET](https://github.com/TannerMidd/LANCET-model), [Kev](https://huggingface.co/ggml-org/Kev-0.8B-GGUF), [Laya](https://huggingface.co/convaiinnovations/laya-typed-decisions) or [Jev](https://docs.typesafe.ai/api) | The command | 15 ms (LANCET) to 174 ms (Kev) |
 | 3. Chat model | The session's own model, or one you pick | Your messages and the session's tool calls | about 0.9 s, or 25 to 85 s when it reasons |
 
 The rules settle most calls. The default uses stages 1 and 3 and needs no setup, because stage 3 is the model the session already runs. Stage 2 is a small model on your CPU, or a hosted one. Alone, it takes the place of the chat model. In front of it, the classifier runs the calls it scores low, asks you about the ones it scores high, and passes the unclear ones on, so the chat model judges far fewer calls. In four of my own Pi sessions, all three stages asked me about 4 of the 258 calls I let run, against 19 with LANCET alone, and called the chat model 17 times instead of 42. [Using all three stages](#using-all-three-stages) has the setup and the numbers.
@@ -106,13 +106,17 @@ Without a UI (print mode, most subagents) there is nobody to ask, so those calls
 
 `withoutUi.rules` has `allow` and `deny` patterns that apply only without a UI. With `"onAsk": "allow"` and `"deny": ["git push *", "gh *"]`, subagents run what would prompt, except pushes and GitHub calls. With the default `"onAsk": "block"`, an `allow` list opens a few commands to subagents and nothing else.
 
+A prompt nobody answers is treated as a `Block` after `promptTimeoutMs`, 60 seconds by default, so an unattended session doesn't stop there forever. The prompt counts the seconds down. Press escape, or leave it alone, and the call is blocked either way; the agent is told to stop and ask you. Set `promptTimeoutMs` to `0` to wait as long as you like.
+
 ### The prompt
 
-Every prompt has `Allow once`, `Allow for this session` and `Block`. Most prompts offer a wider choice, so the next similar call doesn't ask again:
+Every prompt has `Allow once`, `Allow for this session` (that exact command text) and `Block`, and the same choices whether the ask came from your rules, a classifier score or the chat model. Most prompts add two more below `Block`, so the next similar call doesn't ask again:
 
-- **A command.** The prompt offers the command with its subcommand as a pattern, for example `Allow "git push *" for this session` (`gh pr edit *` for `gh`, `git config --global *` for `git config`). The pattern covers every argument, so `git push *` also allows `git push --force`. It never covers root, a credential read or downloaded code: those still ask, even when the command matches.
-  - For a command the rules don't know, the pattern is its subcommand or first flag, and `Always allow "terraform plan *"` also saves it to `rules.allow` in your config. A saved pattern is one of your rules, so it does replace those asks.
-  - No pattern for inline code (`python3 -c`, `bash -c`), `sudo`, credential reads, `gh api`, and programs whose arguments are what they send (`curl`, `wget`, `scp`, `rsync`, `ssh`, `nc`). A command made of several parts that each ask gets one only when they share it. Without a pattern, `Allow for this session` covers that exact command text.
+- **A command**, as a pattern: `Allow "git push *" for this session` and `Always allow "git push *"`. The pattern is the command with its subcommand (`gh pr edit *` for `gh`, `git config --global *` for `git config`). It covers every argument, so `git push *` also allows `git push --force`. It never covers root, a credential read or downloaded code: those still ask, even when the command matches.
+  - When the command runs a script or a program file, the pattern is that file: `bash ./wait.sh *`, `python3 tools/gen.py *`, `./target/app *`. That is the one to pick when only the flags change between calls.
+  - `Always allow` saves the pattern to `rules.allow` in your config. A saved pattern is one of your rules, so it does replace those asks, in every later session as well.
+  - A pattern that came from an ask, like your own `ask` rule, is offered for this session only and never saved: the ask is yours, and saving it would cancel it.
+  - No pattern for inline code (`python3 -c`, `bash -c`), `sudo`, credential reads, `gh api`, root and downloaded code, and programs whose arguments are what they send (`curl`, `wget`, `scp`, `rsync`, `ssh`, `nc`). A command made of several parts that each ask gets one only when they share it. Without a pattern, `Allow for this session` covers that exact command text.
 - **A change outside the working directory.** The prompt offers the folder and not just that one file: the git checkout or worktree the path is in, or else its parent directory. `Always allow changes in <folder>` also saves it to `allowedPaths`. `$HOME` itself and system directories are never offered as a whole.
 
 ### Scripts and programs
@@ -273,9 +277,41 @@ Without LlamaStash, run the container yourself with `docker run -d --rm -p 127.0
 
 With `"decider": ["classifier"]`, or a `classifier` block in the config, the calls the rules leave open go to a decision model that scores the command alone. It only sees the command and the working directory, so it can't tell whether you asked for the action. The rules' ask verdicts skip it: they go to stage 3, or ask you when there is no stage 3. It is small and quick: Kev-0.8B answers in about 174 ms on CPU. The model runs on a local server, or through Pi when you set `classifier.provider`.
 
+### Telling the classifier about the session
+
+`classifier.contextChars` is how much of the session a classifier gets beside the command: the user's own message and the calls before this one, in the shape stage 3 reads them, with assistant prose and tool output left out as they are there. That is the part that tells a model whether you asked for a force push or the agent decided on its own. Set it to 0, the default, and the classifier sees the command alone, which is what every `askAbove` here is tuned against.
+
+Three things to know before turning it on.
+
+- Which key it goes in depends on the server. `contextIn: "state"` sends it as its own `context` key beside the command: a free-form endpoint such as Jev reads it, and llama.cpp's `/v1/systemone` serializes the whole state, so it reaches Kev too. [LANCET's server](#run-lancet-as-a-server) reads only the command field, so for it the only way in is `contextIn: "command"`, which folds the session into the command text. A model fine-tuned on bare commands can also score worse on a paragraph with a command inside it, which is worth measuring on your own cases before you trust it: it did for LANCET.
+- It costs tokens on the fast path, and a small model has a small window: the Kev preset above runs with `--ctx-size 1024`, so a 1200-character session does not fit. Raise the server's window before raising `contextChars`.
+- The thresholds move with it. `askAbove` is a cut on the model's score for the command alone, so re-run the bench and pick a new one: `node bench/run.mjs --stages classifier --context-chars 1200`, then `node bench/score-arms.mjs` to compare the arms.
+
+### What the session did to each model
+
+Measured on `bench/suites/mix100.jsonl`: 100 commands the rules leave open, picked by `bench/make-mix100.mjs` from the other suites and weighted to the categories a classifier gets wrong (GTFOBins shapes it let run, read-only discovery it asked about, secret reads) plus the 20 rows where your own message is what decides. 48 risky, 52 safe. `sh bench/context-arms.sh` runs the arms, `node bench/score-arms.mjs` scores them. Kev ran with `--ctx-size 8192` instead of the 1024 above, so the folded text was not cut off.
+
+| arm | AUC | asks it should not have / misses, at the tuned threshold | median |
+| --- | --- | --- | --- |
+| LANCET, command only | 0.699 | 23 / 11 | 96 ms |
+| LANCET, session as a state key | 0.699 | 23 / 11 | 102 ms |
+| LANCET, session folded into the command | 0.635 | 30 / 8 | 144 ms |
+| Kev-0.8B, command only | 0.853 | 34 / 0 | 624 ms |
+| Kev, session as a state key | 0.867 | 27 / 3 | 641 ms |
+| Kev, session folded into the command | 0.887 | 32 / 0 | 812 ms |
+| Jev 1.13, command only | 0.895 | 20 / 5 | 211 ms |
+| Jev, session as a state key | 0.901 | 17 / 4 | 186 ms |
+| Jev, session folded into the command | 0.903 | 19 / 5 | 203 ms |
+| the chat decider, stage 3 | not scored | 6 / 8 | 59 s |
+
+- Jev gains, at no cost: 20 wrong asks fell to 17, 5 misses to 4, AUC 0.895 to 0.901, and the median call stayed near 0.2 s. On the 20 rows where your message is the deciding fact, its wrong asks went from 7 to 4, against 0 for the chat decider on the same rows.
+- llama.cpp reads the extra state key too: 37 of Kev's scores moved, and a repeat of the command-only arm moved none, so that is the session and not inference jitter. Kev gains AUC with it and is still the weak arm on this mix, trading 34 wrong asks against 18 misses at any threshold.
+- LANCET got worse. Its server reads only the command field, so the state key changed nothing at all, and folding a paragraph of session around the command pushed wrong asks from 23 to 30: a model trained on bare commands reads prose as risk. Leave it at 0.
+- The chat decider remains the ceiling on false asks (6 of 52 safe calls, 0 on the intent rows) at about 300 times the latency of a classifier, which is the whole reason it judges only what the earlier stages leave open.
+
 ### Run the model server
 
-The extension talks to a [llama.cpp](https://github.com/ggml-org/llama.cpp) server through the `/v1/systemone` endpoint, which needs a build from October 2, 2026 or later ([#29818](https://github.com/ggml-org/llama.cpp/pull/29818)). I use [Kev-0.8B](https://huggingface.co/jaredpalmer/kev-0.8b) as a Q8 GGUF (774 MB).
+The extension talks to a [llama.cpp](https://github.com/ggml-org/llama.cpp) server through the `/v1/systemone` endpoint, which needs a build from October 2, 2026 or later ([#29818](https://github.com/ggml-org/llama.cpp/pull/29818)). I use [Kev-0.8B](https://huggingface.co/ggml-org/Kev-0.8B-GGUF) as a Q8 GGUF (774 MB).
 
 ```bash
 llama-server -hf ggml-org/Kev-0.8B-GGUF:Q8_0 --host 127.0.0.1 --port 11438 --no-webui \
@@ -397,6 +433,8 @@ These are the setups I tested. Each one has the `config.json` and the server def
 | `risky`, `safe` | Descriptions of the yes and no answers. Not used when `levels` is set |
 | `levels` | When set, the main question is a graded score over these levels |
 | `extraQuestions` | More yes/no questions, each with its own optional `askAbove` |
+| `contextChars` | How much of the session the classifier is told about, in characters: the user's own message and the calls before this one, as the chat decider sees them. 0 (the default) tells it the command alone |
+| `contextIn` | `state`: the session goes beside the command as its own `context` key, which Jev and llama.cpp's server read. `command`: it is folded into the command text, the only way a server that reads that one field, like [LANCET's](#run-lancet-as-a-server), can see it |
 
 The other keys (`enabled`, `withoutUi`, `log`, `rules`, `allowedPaths`, `guardedPaths`) work the same with every model, so the samples leave them out.
 
@@ -717,6 +755,7 @@ Optional, in `~/.pi/agent/extensions/pi-automode-classifier/config.json`. A conf
 | `rules` | all empty | Your own `deny`, `ask`, `classify` and `allow` patterns |
 | `allowedPaths` | `[]` | More directories where file changes are allowed, like the project directory |
 | `guardedPaths` | `[]` | More paths that count as the guard's own files, so changes to them always ask |
+| `promptTimeoutMs` | `60000` | A confirm prompt nobody answers is treated as a `Block` after this long, so an unattended session doesn't wait there forever. `0` waits forever |
 | `withoutUi.onAsk` | `"block"` | What to do with a call that needs a prompt when there is no UI: `block` or `allow`. Root, credential reads, downloaded code and this extension's own files are blocked either way, unless one of your rules matches |
 | `withoutUi.rules` | empty `allow` and `deny` | Patterns added to `rules` when there is no UI. A `deny` here wins over an `allow` in `rules` |
 | `decider` | from the blocks | The deciders in the order they run: `llm`, `classifier` and `command`, with `llm` last. Left out: `["command"]` when `command.argv` is set, `["classifier"]` when there is a `classifier` block, `["llm"]` otherwise. `[]`: every call the rules leave open asks you |
@@ -815,6 +854,10 @@ I also ran the models, and three more classifiers built for command risk, on com
 - The sets are small, and the Rogue Security labels depend on what the user asked for in the session, which none of these models see.
 
 These datasets also showed what the rules missed: reads of credential files with read-only commands, which is why [credential files](#credential-files) ask now.
+
+### Telling the classifier about the session
+
+I measured `classifier.contextChars` on a mixed set of 100 commands the rules leave open ([bench/suites/mix100.jsonl](bench/suites/mix100.jsonl), built by `bench/make-mix100.mjs`, run with `sh bench/context-arms.sh` and scored with `node bench/score-arms.mjs`). It cuts Jev's wrong asks from 20 to 17 and its misses from 5 to 4 at no latency cost, changes nothing for LANCET as a state key and makes it worse folded into the command; the table and what it means are under [What the session did to each model](#what-the-session-did-to-each-model).
 
 ## Limits
 

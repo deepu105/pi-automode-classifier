@@ -26,7 +26,7 @@ import { parseArgs } from "node:util";
 const here = import.meta.dirname;
 const guard = path.dirname(here);
 const { values: args } = parseArgs({
-  options: { stages: { type: "string", default: "flow" }, suites: { type: "string" }, "ask-above": { type: "string" }, "allow-below": { type: "string" }, limit: { type: "string" } },
+  options: { stages: { type: "string", default: "flow" }, suites: { type: "string" }, "ask-above": { type: "string" }, "allow-below": { type: "string" }, limit: { type: "string" }, config: { type: "string" }, arm: { type: "string" }, "context-chars": { type: "string" }, "context-in": { type: "string" }, shard: { type: "string" } },
 });
 if (!["classifier", "llm", "flow", "rules"].includes(args.stages)) throw new Error(`--stages must be classifier, llm, flow or rules, not ${args.stages}`);
 
@@ -34,7 +34,7 @@ if (!["classifier", "llm", "flow", "rules"].includes(args.stages)) throw new Err
 // so parallel runs do not read each other's decisions.
 process.env.XDG_STATE_HOME = path.join(here, "results", ".state", String(process.pid));
 const { default: extension, loadConfig, LOG_FILE } = await import(path.join(guard, "index.ts"));
-const configFile = path.join(here, "config.json");
+const configFile = args.config ?? path.join(here, "config.json");
 const loaded = loadConfig(configFile);
 if (loaded.error) console.error(loaded.error);
 const base = loaded.config;
@@ -47,8 +47,19 @@ if (decider.includes("llm") && !base.llm.provider && !base.llm.model) {
 }
 const askAbove = Number(args["ask-above"] ?? base[scorers[0]].askAbove);
 const allowBelow = Number(args["allow-below"] ?? base[scorers[0]].allowBelow);
-const config = { ...base, log: true, decider, ...Object.fromEntries(scorers.map((s) => [s, { ...base[s], askAbove, allowBelow }])) };
-const out = path.join(here, "results", ["llm", "rules"].includes(args.stages) ? args.stages : `${args.stages}-${askAbove}-${allowBelow}`);
+// What the classifier arms are told about the call, for the context experiments: the command
+// alone, or that plus the session the chat model sees. See classifier.contextChars in the README.
+const contextChars = Number(args["context-chars"] ?? base.classifier.contextChars);
+const contextIn = args["context-in"] ?? base.classifier.contextIn;
+const config = {
+  ...base,
+  log: true,
+  decider,
+  ...Object.fromEntries(scorers.map((s) => [s, { ...base[s], askAbove, allowBelow, ...(s === "classifier" ? { contextChars, contextIn } : {}) }])),
+};
+// One results folder per arm, so a comparison run does not overwrite the baseline it compares to.
+const tag = [args.arm ?? "", contextChars ? `ctx${contextChars}${contextIn}` : ""].filter(Boolean).join("-");
+const out = path.join(here, "results", (["llm", "rules"].includes(args.stages) ? args.stages : `${args.stages}-${askAbove}-${allowBelow}`) + (tag ? `-${tag}` : ""));
 fs.mkdirSync(out, { recursive: true });
 
 const pi = await import("@earendil-works/pi-coding-agent").catch(() => {
@@ -82,9 +93,12 @@ const totals = [];
 console.log(`stages: ${["rules", ...decider].join(" > ")}, allowBelow ${allowBelow}, askAbove ${askAbove}, config: ${fs.existsSync(configFile) ? configFile : "plugin defaults"}`);
 for (const name of names) {
   const rows = fs.readFileSync(path.join(here, "suites", `${name}.jsonl`), "utf8").trim().split("\n").map((l) => JSON.parse(l));
-  const file = path.join(out, `${name}.jsonl`);
+  // Rows split across processes, so a slow arm can run in parallel shards: --shard 1/4.
+  const [shardOf, shardCount] = (args.shard ?? "").split("/").map(Number);
+  const sharded = shardOf && shardCount ? rows.filter((_, i) => i % shardCount === shardOf - 1) : rows;
+  const file = path.join(out, shardOf ? `${name}-${args.shard.replace("/", "of")}.jsonl` : `${name}.jsonl`);
   const done = new Map((fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean) : []).map((l) => [JSON.parse(l).id, JSON.parse(l)]));
-  for (const row of rows.slice(0, args.limit ? Number(args.limit) : undefined)) {
+  for (const row of sharded.slice(0, args.limit ? Number(args.limit) : undefined)) {
     if (done.has(row.id)) continue;
     const tool = row.tool ?? "bash";
     const input = row.path !== undefined ? { path: fill(row.path) } : { command: fill(row.command) };

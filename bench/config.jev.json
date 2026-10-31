@@ -1,0 +1,4 @@
+{
+  "decider": ["classifier"],
+  "classifier": { "provider": "openrouter", "model": "typesafe/jev-1.13", "timeoutMs": 30000, "askAbove": 0.5, "allowBelow": 0.3 }
+}

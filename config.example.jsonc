@@ -22,6 +22,10 @@
   // More files or directories that count as this extension's own: changes to them always ask.
   "guardedPaths": [],
 
+  // A confirm prompt nobody answers is treated as a Block after this long, so an unattended
+  // session does not stop there forever. 0 waits forever.
+  "promptTimeoutMs": 60000,
+
   // When there is no UI to show a prompt (print mode, most subagents).
   "withoutUi": {
     // A call that needs a prompt: "block" or "allow". Root, credential reads, downloaded code and
@@ -124,7 +128,14 @@
     "levels": [],
     // More questions, by id. Each adds about one model call. A value is a bare question string,
     // or {"question", "yes", "no", "askAbove"}.
-    "extraQuestions": {}
+    "extraQuestions": {},
+    // How much of the session the model is told about, in characters: the user's own message and
+    // the calls before this one, as the chat decider sees them. 0: the command alone.
+    "contextChars": 0,
+    // "state" sends that text as its own `context` key beside the command, which a free-form
+    // server such as Jev reads. "command" folds it into the command text, which is the only way a
+    // server that reads just the command can see it. Either way it is untrusted content.
+    "contextIn": "state"
   },
 
   // A classifier that runs as a process, like LANCET's classify.py. It reads a JSON line per
