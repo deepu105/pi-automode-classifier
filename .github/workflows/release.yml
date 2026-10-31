@@ -34,6 +34,13 @@ jobs:
       - run: node test.mjs
       # Provenance is built and attached by itself under trusted publishing.
       - run: npm publish
-      # After the publish, so a failed publish leaves no release behind it.
+      # After the publish, so a failed publish leaves no release behind it. Notes come
+      # from release-notes/<tag>.md when the release commit carries one.
       - name: GitHub release
-        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
+        run: |
+          notes="release-notes/$GITHUB_REF_NAME.md"
+          if [ -f "$notes" ]; then
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file "$notes"
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
+          fi
