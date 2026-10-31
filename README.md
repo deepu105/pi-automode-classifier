@@ -891,6 +891,10 @@ Any setup:
 
 `node test.mjs` runs the rule, config and handler tests and needs no server. It needs `git`, and it makes a scratch repository under `$HOME` and removes it again. The benches run the suites in `bench/suites` through the plugin's own `tool_call` handler, as Pi calls it, with the rules, classifier and chat model from `bench/config.json` (same shape as the plugin's config), or the plugin's defaults without it. `npm run bench` stops after the classifier, `npm run bench:llm` sends the `user-requests` and `bench-llm-cases` suites to the chat model only, and `npm run bench:flow` runs all three stages on every suite. They take `--suites a,b`, `--ask-above`, `--allow-below` and `--limit`, print safe and risky commands run and stopped per suite, and write per-row results to `bench/results`. They need `pi` installed, and a chat model in `bench/config.json` for `bench:llm` and `bench:flow`. Tests and benches need Node 22.18 or newer, and none executes the commands under test.
 
+### CI and releasing
+
+`.github/workflows/ci.yml` runs `node test.mjs` on Node 22 and 24 for every push to `main` and every pull request. `.github/workflows/release.yml` runs on a `v*` tag: it checks the tag against `version` in `package.json`, runs the tests and publishes to npm with [trusted publishing](https://docs.npmjs.com/trusted-publishers/), so no token is stored in the repo. To release: bump `version`, commit, then `git tag v<version> && git push origin v<version>`. On npmjs.com the package's trusted publisher is user `deepu105`, repository `pi-automode-classifier`, workflow filename `release.yml`, no environment, with `Allow npm publish` ticked: an entry created after 2026-09-03 only allows `npm stage publish` until you tick it, npm checks none of it until a publish runs, and the entry expires 2 days after you create it if nothing publishes through it.
+
 ## License
 
 MIT

@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22.18 is the oldest Node that runs TypeScript directly, which is what
+        # the package and its tests do.
+        node: ["22", "24"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+      # No install: the package has no dependencies, and the only Pi import is
+      # `import type`, which Node strips before running.
+      - run: node --version
+      - run: node test.mjs

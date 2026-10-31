@@ -1,0 +1,36 @@
+name: Release
+
+# Publishes to npm with trusted publishing (OIDC), so there is no token to keep.
+# On npmjs.com the package's trusted publisher must name this file's name,
+# `release.yml`, under the repository below, and "Allow npm publish" must be
+# ticked: a publisher created after 2026-09-03 only allows `npm stage publish`
+# until you tick it. No environment is used here, so leave that field empty.
+# npm verifies none of this until a publish runs, and the publisher entry
+# expires 2 days after you create it if nothing publishes through it.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: npm-publish
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          # Trusted publishing needs npm 11.5.1 or newer.
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+      - name: The tag must be the version in package.json
+        run: test "v$(node -p 'require("./package.json").version')" = "$GITHUB_REF_NAME"
+      - run: node test.mjs
+      # Provenance is built and attached by itself under trusted publishing.
+      - run: npm publish
