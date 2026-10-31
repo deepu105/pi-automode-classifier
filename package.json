@@ -1,6 +1,6 @@
 {
   "name": "pi-automode-classifier",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Auto mode for Pi: deterministic rules first, then a local decision model, then a confirm prompt",
   "keywords": [
     "pi-package",
