@@ -279,13 +279,20 @@ With `"decider": ["classifier"]`, or a `classifier` block in the config, the cal
 
 ### Telling the classifier about the session
 
-`classifier.contextChars` is how much of the session a classifier gets beside the command: the user's own message and the calls before this one, in the shape stage 3 reads them, with assistant prose and tool output left out as they are there. That is the part that tells a model whether you asked for a force push or the agent decided on its own. Set it to 0, the default, and the classifier sees the command alone, which is what every `askAbove` here is tuned against.
+A classifier sees the command alone, which is what every `askAbove` in this README is tuned against. Two keys give it the rest of the session.
 
-Three things to know before turning it on.
+| You set | What it does |
+| --- | --- |
+| `classifier.contextChars: 1200` | The classifier also gets your messages and the calls before this one, up to that many characters, with assistant prose and tool output left out. That is the part that tells a model whether you asked for a force push or the agent decided on its own. `0`, the default, keeps it off. |
+| `classifier.contextIn: "state"` | The session goes beside the command as its own `context` key. Use this for Jev, and for llama.cpp's `/v1/systemone`, which passes the whole state through. |
+| `classifier.contextIn: "command"` | The session is folded into the command itself. Use this for [LANCET's server](#run-lancet-as-a-server), which reads only the command field. |
 
-- Which key it goes in depends on the server. `contextIn: "state"` sends it as its own `context` key beside the command: a free-form endpoint such as Jev reads it, and llama.cpp's `/v1/systemone` serializes the whole state, so it reaches Kev too. [LANCET's server](#run-lancet-as-a-server) reads only the command field, so for it the only way in is `contextIn: "command"`, which folds the session into the command text. A model fine-tuned on bare commands can also score worse on a paragraph with a command inside it, which is worth measuring on your own cases before you trust it: it did for LANCET.
-- It costs tokens on the fast path, and a small model has a small window: the Kev preset above runs with `--ctx-size 1024`, so a 1200-character session does not fit. Raise the server's window before raising `contextChars`.
-- The thresholds move with it. `askAbove` is a cut on the model's score for the command alone, so re-run the bench and pick a new one: `node bench/run.mjs --stages classifier --context-chars 1200`, then `node bench/score-arms.mjs` to compare the arms.
+Two things to check before you trust it.
+
+- The model's window has to hold the extra text. The Kev preset above runs with `--ctx-size 1024`, so a 1200-character session does not fit. Raise the server's window before raising `contextChars`.
+- The thresholds move with it. `askAbove` is a cut on the model's score for the command alone, so re-run the bench and pick a new one: `node bench/run.mjs --stages classifier --context-chars 1200`, then `node bench/score-arms.mjs`.
+
+A model fine-tuned on bare commands can also score worse on a paragraph that has a command inside it, which is what happened to LANCET in the numbers below. Measure it on your own cases before relying on it.
 
 ### What the session did to each model
 
