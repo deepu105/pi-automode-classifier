@@ -13,7 +13,7 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 concurrency:
@@ -34,3 +34,6 @@ jobs:
       - run: node test.mjs
       # Provenance is built and attached by itself under trusted publishing.
       - run: npm publish
+      # After the publish, so a failed publish leaves no release behind it.
+      - name: GitHub release
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
