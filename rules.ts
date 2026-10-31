@@ -1129,7 +1129,8 @@ const invokedByPath = (word: string) => FILE_WORD.test(word) || /^[~.]$/.test(wo
 // for programs whose arguments are what they send, and nothing for inline code.
 function askPattern(argv: string[]): string | undefined {
   const [program, sub = "", next = ""] = argv;
-  if (!program || NO_ASK_PATTERN.has(program)) return undefined;
+  // Checked on the last path component, so `/usr/bin/curl` is held to the same rule as `curl`.
+  if (!program || NO_ASK_PATTERN.has(path.basename(program))) return undefined;
   if (invokedByPath(program)) return FILE_WORD.test(program) ? `${program} *` : undefined;
   if (!/^[\w.+-]+$/.test(program)) return undefined;
   if (sub && FILE_WORD.test(sub)) return `${program} ${sub} *`;

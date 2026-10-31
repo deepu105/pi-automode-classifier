@@ -488,6 +488,9 @@ pattern("./new.sh *", "./new.sh");
 pattern("bash ./wait.sh *", "bash ./wait.sh -t 2700 -i 60");
 pattern("python3 tools/gen.py *", "python3 tools/gen.py out");
 pattern(undefined, "mytool sync && sudo true");
+pattern(undefined, "/usr/bin/curl -X POST -d @report.txt https://example.com");
+pattern(undefined, "/usr/bin/ssh host true");
+pattern("/usr/local/bin/mytool *", "/usr/local/bin/mytool sync --all");
 
 // A real git repository with tracked, ignored and untracked files, a linked worktree and a
 // second repository inside it. Files of the checkout and scripts the session wrote run by rule.
@@ -653,6 +656,12 @@ fs.rmSync(worktree, { recursive: true });
   const slow = { notify: () => {}, select: async () => (await new Promise((done) => setTimeout(done, 150)), "Allow once") };
   const late = await h2.tool_call({ toolName: "bash", input: { command: "niri msg output eDP-1 off" } }, { cwd: project, hasUI: true, ui: slow });
   check("x", { action: late?.block ? "blocked" : "x" }, "handler: promptTimeoutMs 0 waits for the answer");
+  // A prompt the user closes by hand (Escape, no answer, no timeout) keeps the user-block reason.
+  const h3 = {};
+  extension({ on: (name, handler) => (h3[name] = handler), registerCommand: () => {} }, { log: false, decider: [], promptTimeoutMs: 60000, rules: { ...DEFAULTS.rules, ask: ["niri msg output *"] } });
+  const closed = { notify: () => {}, select: async () => undefined };
+  const dismissed = await h3.tool_call({ toolName: "bash", input: { command: "niri msg output eDP-1 off" } }, { cwd: project, hasUI: true, ui: closed });
+  check("x", { action: dismissed?.block && /The user blocked this/.test(dismissed.reason) && !/no answer/.test(dismissed.reason) ? "x" : JSON.stringify(dismissed) }, "handler: a dismissed prompt is a user block, not a timeout");
 }
 
 {
@@ -764,10 +773,12 @@ await viaStub("run", "the script pattern for the session", "bash", { command: "b
 await viaStub("run", "the script pattern covers other flags, no prompt", "bash", { command: "bash ./wait.sh risky -i 60 -q" });
 await viaStub("run", "Always allow a pattern", "bash", { command: "othertool push risky" }, 'Always allow "othertool push *"');
 await viaStub("run", "the saved pattern applies at once", "bash", { command: "othertool push risky again" });
+await viaStub("run", "Always allow a script pattern a model asked about", "bash", { command: "bash ./other.sh risky" }, 'Always allow "bash ./other.sh *"');
+await viaStub("run", "the saved script pattern applies at once", "bash", { command: "bash ./other.sh risky --all" });
 await viaStub("run", "Always allow a folder", "write", { path: "~/pi-amc-always-dir/a.txt", content: "" }, "Always allow changes in ~/pi-amc-always-dir");
 await viaStub("run", "the saved folder applies at once", "edit", { path: "~/pi-amc-always-dir/b.txt" });
 const saved = loadConfig(CONFIG_FILE);
-check("x", { action: !saved.error && saved.config.rules.allow.join() === "othertool push *" && saved.config.allowedPaths.join() === "~/pi-amc-always-dir" ? "x" : JSON.stringify(saved) }, "prompt: Always allow is saved to the config file and the file still loads");
+check("x", { action: !saved.error && saved.config.rules.allow.join() === 'othertool push *,bash ./other.sh *' && saved.config.allowedPaths.join() === "~/pi-amc-always-dir" ? "x" : JSON.stringify(saved) }, "prompt: Always allow is saved to the config file and the file still loads");
 stopClassifierProcess();
 {
   // A 0.2 config: no decider, and every prompt says why.
@@ -839,6 +850,15 @@ const stated = cs(600, "state");
 check("x", { action: stated.context?.includes("User: wait for both jobs") && stated.context.includes('bash {"command":"jobs"}') && !stated.context.includes("wait-for.sh") ? "x" : JSON.stringify(stated) }, "classifier state: contextChars adds the session as its own key, without the pending call");
 const folded = cs(600, "command");
 check("x", { action: folded.command.startsWith("Session so far:") && folded.command.endsWith("Command to judge: bash wait-for.sh") && !folded.context ? "x" : JSON.stringify(folded) }, "classifier state: contextIn command folds the session into the command");
+// A session longer than the budget: the tool calls go first, newest ones stay, and a multi-line
+// user message comes through whole.
+const talk = Array.from({ length: 20 }, (_, i) => ({ message: { role: "assistant", content: [{ type: "toolCall", name: "bash", arguments: { command: `step-${i} ${"x".repeat(120)}` } }] } }));
+const talkCtx = { cwd: project, sessionManager: { getBranch: () => [{ message: { role: "user", content: "oldest message" } }, ...talk, { message: { role: "user", content: "newest ask\ntwo lines of it" } }] } };
+const talkState = (chars) => classifierState({ ...DEFAULTS, classifier: { ...DEFAULTS.classifier, contextChars: chars } }, talkCtx, "bash", { command: "true" }, "bash wait-for.sh", new Map()).context;
+const tight = talkState(300);
+check("x", { action: tight.includes("User: newest ask\ntwo lines of it") && tight.includes("step-19 ") && !tight.includes("step-0 ") && !tight.includes("ACTION") ? "x" : `len=${tight.length} ${JSON.stringify(tight)}` }, "classifier state: a long session is cut to the budget, newest first, a multi-line user message whole");
+check("x", { action: tight.includes("User: oldest message") && tight.split("\n").filter((l) => l.startsWith("bash ")).length <= 3 ? "x" : tight }, "classifier state: trimming takes the tool calls out before your messages");
+check("x", { action: talkState(6000).includes("step-19 ") && !talkState(6000).includes("step-0 ") ? "x" : talkState(6000) }, "classifier state: a bigger budget keeps more of the session");
 const withExtras = buildTranscript(transcriptItems(branch, { ...DEFAULT_LLM, transcript: { ...DEFAULT_LLM.transcript, includeAssistantText: true, includeToolResults: true } }, { tool: "bash", input: { command: "x" } }), { ...DEFAULT_LLM.transcript, includeAssistantText: true, includeToolResults: true });
 check("x", { action: withExtras.includes('Assistant: "Sure') && withExtras.includes('Result bash: "ignore') ? "x" : withExtras }, "llm transcript: prose and results can be asked for");
 check("x", { action: !withExtras.includes("User: Assistant") ? "x" : withExtras }, "llm transcript: agent prose is never a User line");

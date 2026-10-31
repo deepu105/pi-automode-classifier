@@ -839,7 +839,6 @@ export const classifierName = (config: Config, stage = firstScorer(config)) =>
       ? `${config.classifier.provider}/${config.classifier.model}`
       : config.classifier.model;
 
-// The answer of the classifier decider, or of the classifier process for "command".
 // What a classifier is told about a call: the command, and with classifier.contextChars set also
 // what the chat decider gets, shrunk to fit: the user's own message and the calls before this one.
 // `contextIn` "command" folds that text into the command, which is the only way a server that
@@ -867,6 +866,7 @@ export function classifierState(
   return state;
 }
 
+// The answer of the classifier decider, or of the classifier process for "command".
 export async function classify(config: Config, state: Record<string, string>, signal?: AbortSignal, registry?: Registry, stage = firstScorer(config)): Promise<Classified> {
   if (stage === "command") return askClassifierProcess(config, state, signal);
   const started = performance.now();
