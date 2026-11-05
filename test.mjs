@@ -676,6 +676,21 @@ fs.rmSync(worktree, { recursive: true });
   const again = await call("sh amc-later.sh");
   check("x", { action: !first && !fetched && again && seen.length === 2 ? "x" : JSON.stringify({ first, fetched, again, seen }) }, "handler: a call allowed for the session asks again once it runs a download");
 }
+{
+  // `/automode-classifier off` shows the status block, one numbered row per step.
+  let command;
+  extension({ on: () => {}, registerCommand: (_name, c) => (command = c) }, { decider: ["classifier", "llm"], classifier: { ...DEFAULTS.classifier, provider: "p", model: "m" }, rules: { ...DEFAULTS.rules, deny: ["x"] } });
+  let shown = "";
+  await command.handler("off", { ui: { notify: (text) => (shown = text) } });
+  const want = [
+    "Auto mode: OFF for this session   (turn on: /automode-classifier on)",
+    "1. Rules:      1 deny (no UI: asks blocked, prompts: block after 1 minute)",
+    "2. Classifier: p/m, via Pi (allow < 0.1, next 0.1-0.2, ask >= 0.2)",
+    "3. LLM:        session model, via Pi (two-stage, thinking:low)",
+  ];
+  const lines = shown.split("\n");
+  check("x", { action: want.every((line, i) => lines[i] === line) ? "x" : shown }, "status: numbered rows with score bands");
+}
 const allowing = {};
 const headlessAllow = { withoutUi: { ...DEFAULTS.withoutUi, onAsk: "allow" } };
 extension({ on: (name, handler) => (allowing[name] = handler), registerCommand: () => {} }, { log: false, decider: ["classifier"], ...headlessAllow, rules: { ...DEFAULTS.rules, allow: ["sudo -n true"] } });

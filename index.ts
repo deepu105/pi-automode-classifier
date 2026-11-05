@@ -1224,6 +1224,45 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
     return { block: true, reason: `The user blocked this (${verdict.reason}). Do not retry it or work around it. Ask the user how to proceed.` };
   });
 
+  const statusText = async (ctx: ExtensionContext) => {
+    const { llm, classifier, command } = config;
+    const row = (label: string, text: string) => `${label.padEnd(15)}${text}`;
+    const home = (text: string) => text.replaceAll(HOME, "~");
+    const some = (pairs: [number, string][]) => pairs.filter(([n]) => n).map(([n, what]) => `${n} ${what}`).join(", ");
+    const bands = (stage: Scorer, last: boolean) => {
+      const { allowBelow, askAbove } = config[stage];
+      return last || allowBelow >= askAbove ? `allow < ${askAbove}, ask >= ${askAbove}` : `allow < ${allowBelow}, next ${allowBelow}-${askAbove}, ask >= ${askAbove}`;
+    };
+    const describe = async (stage: Decider, i: number) => {
+      const label = `${i + 2}. ${stage === "llm" ? "LLM" : stage === "command" ? "Command" : "Classifier"}:`;
+      const last = i === config.decider.length - 1;
+      if (stage === "llm") {
+        const notes = [llm.twoStage ? "two-stage" : "one stage", `thinking:${llm.thinkingLevel}`];
+        if (llm.onBlock === "ask") notes.push("asks instead of blocking");
+        if (llm.onNoAnswer === "ask") notes.push("asks when it has no answer");
+        return row(label, `${llmName(llm, ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined)}, via Pi (${notes.join(", ")})`);
+      }
+      if (stage === "command") return row(label, `${home(command.argv.join(" "))}, ${classifierProcess ? "running" : "not running"} (${bands(stage, last)})`);
+      const extra = Object.keys(classifier.extraQuestions);
+      const where = classifier.provider ? `${classifier.provider}/${classifier.model}, via Pi` : `${classifier.endpoint}, ${(await health(config, 500)) ? "up" : "down"}`;
+      return row(label, `${where} (${bands(stage, last)}${extra.length ? `, extra: ${extra.join(", ")}` : ""})`);
+    };
+    const { deny, ask, classify, allow } = rules.ui;
+    const headless = config.withoutUi.rules;
+    const noUi = `asks ${config.withoutUi.onAsk === "allow" ? "run" : "blocked"}${headless.deny.length || headless.allow.length ? ` + ${some([[headless.deny.length, "deny"], [headless.allow.length, "allow"]])} rules` : ""}`;
+    const yours = some([[deny.length, "deny"], [ask.length, "ask"], [classify.length, "classify"], [allow.length, "allow"], [allowedPaths.length, "allowed paths"]]) || "none";
+    return [
+      `Auto mode: ${enabled ? "on" : "OFF for this session   (turn on: /automode-classifier on)"}`,
+      ...(configError ? [`Config error: ${home(configError)}`] : []),
+      row("1. Rules:", `${yours} (no UI: ${noUi}, prompts: ${config.promptTimeoutMs ? `block after ${afterTimeout(config)}` : "wait forever"})`),
+      ...(config.decider.length ? await Promise.all(config.decider.map(describe)) : [row("2. Decider:", "none, classify verdicts ask you")]),
+      "",
+      row("Session:", `${counts.rule} allowed by rule, ${counts.model} by model, ${counts.asked} asked, ${counts.blocked} blocked${denials.total ? `, ${denials.total} LLM denials (${denials.consecutive} in a row)` : ""}`),
+      row("Config:", `${home(CONFIG_FILE)}${fs.existsSync(CONFIG_FILE) ? "" : " (not present, defaults in use)"}`),
+      row("Log:", config.log ? home(LOG_FILE) : "off"),
+    ].join("\n");
+  };
+
   pi.registerCommand("automode-classifier", {
     description: "Auto mode guard: status | on | off",
     getArgumentCompletions: (prefix) => ["status", "on", "off"].filter((a) => a.startsWith(prefix)).map((a) => ({ value: a, label: a })),
@@ -1231,46 +1270,7 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
       const arg = args.trim();
       if (arg === "on" || arg === "off") enabled = arg === "on";
       else if (arg && arg !== "status") return ctx.ui.notify("Usage: /automode-classifier status | on | off", "warning");
-      const { llm, classifier, command } = config;
-      // What a classifier sends to the next decider.
-      const passes = (stage: Scorer, i: number) => (i < config.decider.length - 1 ? `; ${config[stage].allowBelow} to ${config[stage].askAbove} goes to the next decider` : "");
-      const describe = async (stage: Decider, i: number) => {
-        if (stage === "llm") {
-          const lists = mergeRules(DEFAULT_RULES, llm.prompt);
-          return (
-            `chat decider ${llmName(llm, ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined)} (${llm.twoStage ? "two-stage" : "one stage"}, thinking ${llm.thinkingLevel}), ` +
-            `blocks by ${llm.onBlock}, ${llm.onNoAnswer === "block" ? "fails closed" : "asks when it cannot answer"}; ` +
-            `${lists.hardDeny.length} hard block, ${lists.softDeny.length} soft block, ${lists.allow.length} allow, ${lists.environment.length} environment lines; ` +
-            `transcript ${llm.transcript.maxEntries} entries / ${llm.transcript.maxChars} chars`
-          );
-        }
-        if (stage === "command") return `classifier process ${command.argv.join(" ")}: ${classifierProcess ? "running" : "not running"} (asks at risk >= ${command.askAbove}${passes(stage, i)})`;
-        const extra = Object.keys(classifier.extraQuestions);
-        return (
-          (classifier.provider
-            ? `model ${classifier.provider}/${classifier.model} through Pi (commands are sent to ${classifier.provider})`
-            : `model server ${classifier.endpoint}: ${(await health(config, 500)) ? "up" : "down"}`) +
-          ` (asks at risk >= ${classifier.askAbove}${passes(stage, i)})${extra.length ? `, extra questions: ${extra.join(", ")}` : ""}`
-        );
-      };
-      const where = config.decider.length
-        ? (await Promise.all(config.decider.map(describe))).map((text, i) => (config.decider.length > 1 ? `${i + 1}. ${text}` : text)).join("\n")
-        : "no decider: what one would judge asks you";
-      const headless = config.withoutUi.rules;
-      ctx.ui.notify(
-        [
-          `pi-automode-classifier: ${enabled ? "on" : "OFF for this session"}`,
-          where,
-          `your rules: ${rules.ui.deny.length} deny, ${rules.ui.ask.length} ask, ${rules.ui.classify.length} classify, ${rules.ui.allow.length} allow; ${allowedPaths.length} allowed paths`,
-          `without a UI: asks ${config.withoutUi.onAsk === "allow" ? "run" : "are blocked"}${headless.allow.length || headless.deny.length ? `, plus ${headless.deny.length} deny and ${headless.allow.length} allow rules` : ""}`,
-          `prompts: ${config.promptTimeoutMs ? `block after ${afterTimeout(config)} without an answer` : "wait forever"}`,
-          `this session: ${counts.rule} allowed by rule, ${counts.model} by model, ${counts.asked} asked, ${counts.blocked} blocked${denials.total ? `; decider denials ${denials.total} (${denials.consecutive} in a row)` : ""}`,
-          `config: ${CONFIG_FILE}${fs.existsSync(CONFIG_FILE) ? "" : " (not present, defaults in use)"}`,
-          config.log ? `log: ${LOG_FILE}` : "log: off",
-          ...(configError ? [configError] : []),
-        ].join("\n"),
-        enabled && !configError ? "info" : "warning",
-      );
+      ctx.ui.notify(await statusText(ctx), enabled && !configError ? "info" : "warning");
     },
   });
 }
