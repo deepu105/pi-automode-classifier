@@ -37,6 +37,8 @@ jobs:
       # After the publish, so a failed publish leaves no release behind it. Notes come
       # from release-notes/<tag>.md when the release commit carries one.
       - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           notes="release-notes/$GITHUB_REF_NAME.md"
           if [ -f "$notes" ]; then
