@@ -9,7 +9,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { bashVerdict, commitWrites, compileRules, fileVerdict, isRootLike, makeScope, readVerdict, within, type Origin, type Scope, type SessionFiles, type Verdict } from "../rules.ts";
+import { bashVerdict, commitWrites, compileRules, fileVerdict, filesVerdict, isRootLike, makeScope, readVerdict, within, type Origin, type Scope, type SessionFiles, type Verdict } from "../rules.ts";
 import { denyMessage, type Outcome, type TranscriptItem } from "../automode.ts";
 import { classify, classifierContext, classifierName, type Registry } from "./classifier.ts";
 import { decideWithLlm, llmName, type ChatRegistry } from "./llm.ts";
@@ -19,8 +19,10 @@ import { afterTimeout, clip } from "./util.ts";
 const HOME = os.homedir();
 
 // What one call is about: the command text or the file it touches. `label` is what the file rules
-// call the tool: "write" replaces a whole file, "edit" keeps the file's origin.
-export type GuardSubject = { kind: "bash" | "write" | "read"; label: string; subject: string };
+// call the tool: "write" replaces a whole file, "edit" keeps the file's origin. `paths` names every
+// file a call touches, when one argument does not say them all (a V4A patch writes to many). With
+// `kind: "unknown"` the host could not read the call at all: `subject` says why, and the call asks.
+export type GuardSubject = { kind: "bash" | "write" | "read" | "unknown"; label: string; subject: string; paths?: string[] };
 
 // A confirm prompt: what to show, what to answer with, and how long to wait.
 export interface GuardPrompt {
@@ -178,10 +180,14 @@ export function createGuard(config: Config, host: GuardHost, initial?: GuardStat
       if (!target) return { action: "none" };
       const subject = target.subject;
       let verdict: Verdict;
-      if (target.kind === "bash") {
+      if (target.kind === "unknown") {
+        // A call nobody can read: held back like the root and credential asks, so a host with
+        // `withoutUi.onAsk` "allow" cannot run it either.
+        verdict = { action: "ask", reason: subject, firm: true, critical: true };
+      } else if (target.kind === "bash") {
         verdict = bashVerdict(subject, scope);
       } else if (target.kind === "write") {
-        verdict = fileVerdict(target.label, subject, scope);
+        verdict = filesVerdict(target.label, target.paths ?? [subject], scope);
       } else {
         // Reads are not checked, except for credential files.
         const secret = readVerdict(target.label, subject, scope);

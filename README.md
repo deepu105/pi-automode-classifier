@@ -882,7 +882,7 @@ Or run the installer a second time, which pulls the source, copies it into every
 
 | In Pi | In Hermes |
 | --- | --- |
-| The `bash`, `write`, `edit`, `read`, `grep` tools | `terminal`, `process_manage` and `execute_code` as commands; `write_file` and `patch` as file changes; `read_file` and `search_files` as reads; a `cronjob_manage` script as a command it runs later; `skill_manage` and `memory` as changes in the profile's own folders. [Every tool Hermes can use](#every-tool-hermes-can-use) has the whole list |
+| The `bash`, `write`, `edit`, `read`, `grep` tools | `terminal` (with its own `workdir`) and `execute_code` as commands, and the text `process_manage` writes and submits; `write_file` and `patch` as file changes, every file a V4A patch names; `read_file` and `search_files` as reads; a `cronjob_manage` script as a command it runs later; `skill_manage` and `memory` as changes in the profile's own folders. [Every tool Hermes can use](#every-tool-hermes-can-use) has the whole list |
 | The confirm prompt | Hermes' approval gate. Its own timeout and approval rules decide what a repeat call costs |
 | Nobody to ask: print mode, most subagents | cron runs, kanban workers and programmatic platforms (`webhook`, `api_server`). `withoutUi.onAsk` decides there |
 | Pi's `settings.json` and this extension's files | the profile's `config.yaml`, `.env`, `SOUL.md`, `shell-hooks-allowlist.json`, the plugin folder and its config folder. Always ask, no rule opens them |
@@ -902,8 +902,8 @@ Hermes 0.23.3 has 67 built-in tools, and a plugin or an MCP server can add more.
 
 | Tools | What they do | Why the guard decides as it does |
 | --- | --- | --- |
-| `terminal`, `process_manage`, `execute_code` | Run a shell line, manage a background process, run Python that calls Hermes tools | Judged as commands, the same rules Pi's `bash` tool gets |
-| `write_file`, `patch` | Replace a file, edit one | Judged as file changes: `write_file` sets a file's origin to "this session wrote it", `patch` keeps the origin it had |
+| `terminal`, `process_manage`, `execute_code` | Run a shell line, manage a background process, run Python that calls Hermes tools | Judged as commands, the same rules Pi's `bash` tool gets. A `terminal` `workdir` is judged as the `cd` it is, so it cannot make that folder the project. `process_manage` `write` and `submit` are judged on the text they send to the process, because that text runs; `poll`, `log`, `wait`, `kill` and the rest change nothing, and an action the guard does not know asks |
+| `write_file`, `patch` | Replace a file, edit one | Judged as file changes: `write_file` sets a file's origin to "this session wrote it", `patch` keeps the origin it had. With `mode: "patch"` a V4A patch names every file it writes in its own headers (Update, Add, Delete, Move), and each one is judged: a patch that names nothing the guard can read asks |
 | `read_file`, `search_files` | Read a file, search files and content | Reads are not checked, except a credential file, which always asks |
 | `cronjob_manage` | Schedule a job: a prompt, a `script` the scheduler runs each tick, or a `monitor` (a URL or a script) | A scheduled script runs later with no guard in front of it, so it is judged now, by the rules for running a file: one this session wrote goes to the chat decider, one it downloaded asks. A job with only a prompt is left alone: the calls it makes are guarded when it fires |
 | `skill_manage`, `memory` | Write a skill document, or a note in `MEMORY.md` / `USER.md` | Neither names the file it changes, so the guard judges the change as one inside `<profile home>/skills` or `<profile home>/memories`. These are instructions the next session reads, so they are judged like the profile's own files, not like project code |

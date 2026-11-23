@@ -31,15 +31,29 @@ const ok = (label, passed, detail = "") => {
 
 // The tool map
 check("terminal is judged as a command", subject("terminal", { command: "ls" }), { kind: "bash", label: "terminal", subject: "ls" });
-check("process_manage is judged as a command", subject("process_manage", { command: "make" }), { kind: "bash", label: "process_manage", subject: "make" });
+check("process_manage sends its text to a running shell", subject("process_manage", { action: "submit", session_id: "proc_1", data: "make" }), { kind: "bash", label: "process_manage", subject: "make" });
+check("polling a process is left alone", subject("process_manage", { action: "poll", session_id: "proc_1" }), undefined);
 check("execute_code is judged as code it runs", subject("execute_code", { code: "print(1)" }), { kind: "bash", label: "execute_code", subject: "print(1)" });
 check("write_file replaces a file", subject("write_file", { path: "/tmp/x" }), { kind: "write", label: "write", subject: "/tmp/x" });
 check("patch edits a file", subject("patch", { path: "/tmp/x" }), { kind: "write", label: "edit", subject: "/tmp/x" });
+check("a patch that edits in place keeps its own path", subject("patch", { mode: "replace", path: "/tmp/x", old_string: "a", new_string: "b" }), { kind: "write", label: "edit", subject: "/tmp/x" });
+// A V4A patch names every file it writes in its own text, the same headers Hermes reads
+// (tools/patch_parser.py): Update / Add / Delete File, and Move File: a -> b.
+const update = (p) => `*** Update File: ${p}\n@@ hint @@\n-old\n+new`;
+const add = (p) => `*** Add File: ${p}\n+one line\n+another`;
+const del = (p) => `*** Delete File: ${p}`;
+const move = (from, to) => `*** Move File: ${from} -> ${to}`;
+const v4a = (...ops) => ["*** Begin Patch", ...ops, "*** End Patch"].join("\n");
+check("a V4A patch is judged by every file it names", subject("patch", { mode: "patch", patch: v4a(update("/tmp/a"), add("/tmp/b")) }), { kind: "write", label: "edit", subject: "/tmp/a /tmp/b", paths: ["/tmp/a", "/tmp/b"] });
+check("a V4A move is judged at both ends", subject("patch", { mode: "patch", patch: v4a(move("/tmp/a", "~/.config/autostart/x.desktop")) }), { kind: "write", label: "edit", subject: "/tmp/a ~/.config/autostart/x.desktop", paths: ["/tmp/a", "~/.config/autostart/x.desktop"] });
+check("a delete is judged too", subject("patch", { mode: "patch", patch: v4a(del("/tmp/a")) }), { kind: "write", label: "edit", subject: "/tmp/a", paths: ["/tmp/a"] });
+check("a patch text with no file header the guard can read is not judged", subject("patch", { mode: "patch", patch: v4a("@@ hint @@", "-a", "+b") }), { kind: "unknown", label: "patch", subject: 'mode "patch" with a patch text that names no file' });
 check("read_file is a read", subject("read_file", { path: "/tmp/x" }), { kind: "read", label: "read", subject: "/tmp/x" });
 check("search_files is a read", subject("search_files", { path: "/tmp" }), { kind: "read", label: "search", subject: "/tmp" });
 check("a tool no rule covers is left alone", subject("browser", { url: "http://x" }), undefined);
 check("a missing argument is left alone", subject("terminal", {}), undefined);
 check("an argument that is not text is left alone", subject("terminal", { command: 5 }), undefined);
+check("a terminal workdir is judged as the cd it is", subject("terminal", { command: "ls", workdir: "/tmp/here" }), { kind: "bash", label: "terminal", subject: "cd '/tmp/here' && ls" });
 check("no arguments at all is left alone", subject("write_file", undefined), undefined);
 
 // The tools that reach a file or a command without naming it in one argument.
@@ -213,6 +227,11 @@ check("a denied command is blocked with a reason", decide("terminal", { command:
 const guardFile = path.join(automode, "config.json");
 const locked = decide("write_file", { path: guardFile, content: "x" });
 ok("a change to the guard's own config asks, and names what to approve", locked.action === "approve" && String(locked.rule_key).startsWith("automode:write_file:"), JSON.stringify(locked));
+// One V4A patch can name the guard's own config, and the `path` argument is not what it writes.
+const patchGuard = decide("patch", { mode: "patch", path: path.join(workspace, "notes.md"), patch: v4a(update(guardFile), add(path.join(workspace, "new.sh"))) });
+ok("a V4A patch that names the guard's own config asks", patchGuard.action === "approve", JSON.stringify(patchGuard));
+check("a V4A patch inside the working folder runs", decide("patch", { mode: "patch", patch: v4a(add(path.join(workspace, "new.sh"))) }), { action: "allow" });
+check("a patch text the guard cannot read asks", decide("patch", { mode: "patch", patch: "some edits, no headers" }).action, "approve");
 const outward = decide("terminal", { command: "git push origin main" });
 ok("what the rules leave to a person asks", outward.action === "approve", JSON.stringify(outward));
 ok("an ask is written to the decision log", decisions().some((e) => e.outcome === "ask" && e.by === "ask" && e.subject === "git push origin main"), JSON.stringify(decisions().at(-1)));
@@ -220,6 +239,16 @@ check("with no way to ask, an ask is a block", decide("terminal", { command: "gi
 check("off for this session lets the call through", decide("terminal", { command: "git push origin main" }, { enabled: false }), { action: "allow" });
 check("on for this session decides as usual", decide("terminal", { command: "git push origin main" }, { enabled: true }).action, "approve");
 check("a read of a credential file asks", decide("read_file", { path: path.join(workspace, ".env") }).action, "approve");
+// `workdir` is the model's own: it must not turn that folder into the project, where every write
+// in it would run by rule.
+const outside = path.join(fixture, "elsewhere");
+fs.mkdirSync(outside, { recursive: true });
+check("a workdir outside the session does not make its writes local", decide("terminal", { command: "echo hi > evil.txt", workdir: outside }).action, "approve");
+check("a workdir that is the session folder runs", decide("terminal", { command: "echo hi > ok.txt", workdir: workspace }), { action: "allow" });
+// What process_manage sends runs in the process, so the guard has to see it.
+check("text sent to a running process is judged", decide("process_manage", { action: "submit", session_id: "proc_1", data: "import os; os.system('rm -rf ~/Documents')" }).action, "approve");
+check("reading a process log runs", decide("process_manage", { action: "log", session_id: "proc_1" }), { action: "allow" });
+check("a process_manage action the guard does not know asks", decide("process_manage", { action: "frobnicate", session_id: "proc_1" }).action, "approve");
 check("a path the rules do not reach runs", decide("read_file", { path: path.join(workspace, "notes.md") }), { action: "allow" });
 
 // A model that cannot answer fails closed: the call goes to the approval gate.

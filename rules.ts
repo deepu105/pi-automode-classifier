@@ -1219,6 +1219,11 @@ export function fileVerdict(tool: string, target: string, scope: Scope): Verdict
   return isLocal(p, scope) ? ALLOW : forDecider(outside(`${tool} outside the working directory: ${target}`, p), scope);
 }
 
+// One call that touches several files (a V4A patch names many): the verdict that holds back most.
+export function filesVerdict(tool: string, targets: string[], scope: Scope): Verdict {
+  return worst(...targets.map((t) => fileVerdict(tool, t, scope)));
+}
+
 // read and grep tools: an ask for a credential file, undefined for every other path.
 export function readVerdict(tool: string, target: string, scope: Scope): Verdict | undefined {
   const secret = secretIn(target.startsWith("@") ? target.slice(1) : target, scope, true);
