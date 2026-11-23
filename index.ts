@@ -107,6 +107,7 @@ export default function (pi: ExtensionAPI, overrides: Partial<ReturnType<typeof 
   // is shared, as it was when this logic sat in one handler.
   const guard = createGuard(config, {
     product: "Pi",
+    blockedBy: "pi-automode-classifier",
     guarded: GUARDED,
     ownDirs: [AGENT_DIR],
     log: (entry) => appendLog(LOG_FILE, config.log, entry),

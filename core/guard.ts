@@ -36,6 +36,11 @@ export interface GuardPrompt {
 export interface GuardHost {
   // The host's name, for reasons about its own files: "Pi", "Hermes".
   product: string;
+  // The name this guard goes by in a block reason: "pi-automode-classifier" for Pi.
+  blockedBy: string;
+  // Where the classifier server start attempt is written, for a host that decides every call in a
+  // new process. Empty keeps the throttle inside this process.
+  startMarker?: string;
   // Files of the guard itself: a change to them always asks and can never be allowed away.
   guarded: string[];
   // The host's own files and folders (Pi's agent directory, a Hermes home): changes to them ask.
@@ -237,7 +242,7 @@ export function createGuard(config: Config, host: GuardHost, initial?: GuardStat
           const last = i === chain.length - 1;
           const items = config.classifier.contextChars ? session.transcript({ tool: request.tool, input }, decided) : [];
           const state = classifierContext(config, { tool: request.tool, cwd: request.cwd, command: subject }, items);
-          const result = await classify(config, state, request.signal, session.registry, stage);
+          const result = await classify(config, state, request.signal, session.registry, stage, { product: host.product, startMarker: host.startMarker });
           steps.push({ decider: stage, model: classifierName(config, stage), ...result });
           entry.steps = steps;
           const risk = "answers" in result ? flagged(config, result.answers, stage) : undefined;
@@ -319,7 +324,7 @@ export function createGuard(config: Config, host: GuardHost, initial?: GuardStat
         held("blocked-by-permissions");
         finish("block", "rule");
         session.notify?.(`Blocked ${request.tool}: ${verdict.reason}`, "warning");
-        return { action: "block", by: "rule", reason: `Blocked by the auto mode guard: ${verdict.reason}. Do not retry it or work around it. Tell the user it was blocked.` };
+        return { action: "block", by: "rule", reason: `Blocked by ${host.blockedBy}: ${verdict.reason}. Do not retry it or work around it. Tell the user it was blocked.` };
       }
 
       if (sessionAllowed.has(key)) {
@@ -343,6 +348,7 @@ export function createGuard(config: Config, host: GuardHost, initial?: GuardStat
         // wrote has to read that way when a later call runs it. A call that is then declined leaves
         // a mark too many, which only costs one more check later.
         commitWrites(scope);
+        counts.asked++;
         return { action: "ask", reason: verdict.reason, tool: request.tool, subject, key };
       }
 

@@ -18,6 +18,7 @@ const { transcriptItems } = await import("./core/llm.ts");
 const { loadConfig } = await import("./core/config.ts");
 const { createGuard } = await import("./core/guard.ts");
 const { mergeState } = await import("./core/session.ts");
+const { takeStartTurn } = await import("./core/classifier.ts");
 
 let failures = 0;
 const check = (label, got, want) => {
@@ -252,6 +253,8 @@ const outward = decide("terminal", { command: "git push origin main" });
 ok("what the rules leave to a person asks", outward.action === "approve", JSON.stringify(outward));
 ok("an ask is written to the decision log", decisions().some((e) => e.outcome === "ask" && e.by === "ask" && e.subject === "git push origin main"), JSON.stringify(decisions().at(-1)));
 check("with no way to ask, an ask is a block", decide("terminal", { command: "git push origin main" }, { hasUI: false }).action, "block");
+const blocked = decide("terminal", { command: "rm -rf /" }, { hasUI: false });
+ok("a blocked call says who blocked it", String(blocked.message).startsWith("Blocked by the auto mode guard:"), JSON.stringify(blocked));
 check("off for this session lets the call through", decide("terminal", { command: "git push origin main" }, { enabled: false }), { action: "allow" });
 check("on for this session decides as usual", decide("terminal", { command: "git push origin main" }, { enabled: true }).action, "approve");
 check("a read of a credential file asks", decide("read_file", { path: path.join(workspace, ".env") }).action, "approve");
@@ -318,6 +321,15 @@ check("the write goes to the approval gate", heldWrite.action, "approve");
 check("and the file it would write is kept as this session's", stateOf("approved-ask").files[madeFile], "authored");
 
 check("and counts the call it decided", stateOf("one-session").counts.rule, 1);
+// The clock that keeps a slow local classifier server from starting once per call. Every Hermes
+// call is its own process, so the clock is a file, not a variable.
+const startMark = path.join(automode, "server-start");
+check("the first call may start the classifier server", takeStartTurn(startMark), true);
+check("one half a minute later may not", takeStartTurn(startMark), false);
+fs.utimesSync(startMark, new Date(0), new Date(0));
+check("and after half a minute it may again", takeStartTurn(startMark), true);
+check("without a file the clock is this process only", takeStartTurn(""), true);
+check("and it holds the next call back", takeStartTurn(""), false);
 const runsDownload = decide("terminal", { command: "./downloaded.sh" }, same);
 ok("a later call that runs it asks, and says where it came from", runsDownload.action === "approve" && String(runsDownload.message).includes("downloaded in this session"), JSON.stringify(runsDownload));
 check("... and it is blocked where nobody can answer", decide("terminal", { command: "./downloaded.sh" }, { ...same, hasUI: false }).action, "block");
@@ -435,7 +447,7 @@ ok("no input at all is an approval", JSON.parse(empty.stdout).action === "approv
 
 // The rows the wrapper prints come from the same config as Pi's.
 const shared = loadConfig(path.join(repo, "config.example.jsonc")).config;
-const guard = createGuard(shared, { product: "Hermes", guarded: [], ownDirs: [], log: () => {}, subject });
+const guard = createGuard(shared, { product: "Hermes", blockedBy: "the auto mode guard", guarded: [], ownDirs: [], log: () => {}, subject });
 const text = await statusText(shared, guard, { config: "/nope/config.json", log: "/nope/log.jsonl" });
 ok("the example config's own status prints without an error", !text.includes("Config error:") && text.includes("Auto mode: on"), text);
 

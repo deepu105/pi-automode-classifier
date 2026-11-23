@@ -339,7 +339,7 @@ const { classify } = await import("./index.ts");
   };
   check("x", { action: (await answer("k1")) === "0.4" && seen.url === "/v1/systemone" && seen.body.questions.risky.type === "noul" && seen.body.state.command === "mytool sync" ? "x" : JSON.stringify(seen) }, "provider: a chat provider gets <baseUrl>/systemone with its key");
   check("x", { action: (await answer("wrong")) === "unauthorized" ? "x" : "bad" }, "provider: a refused key is an error");
-  check("x", { action: /no classifier model nope\/lancet is set up/.test(await answer("k1", { ...via, classifier: { ...via.classifier, provider: "nope" } })) ? "x" : "bad" }, "provider: an unknown provider is an error");
+  check("x", { action: /Pi has no classifier model nope\/lancet/.test(await answer("k1", { ...via, classifier: { ...via.classifier, provider: "nope" } })) ? "x" : "bad" }, "provider: an unknown provider is an error");
   check("x", { action: /expects "kev"/.test(await answer("k1", { ...via, classifier: { ...via.classifier, model: "kev" } })) ? "x" : "bad" }, "provider: the served model name is checked");
   server.close();
 }
@@ -587,6 +587,10 @@ const handle = async (want, label, toolName, input, hasUI, answer) => {
 };
 await handle("run", "ls runs", "bash", { command: "ls -la" }, false);
 await handle("run", "read tool is not covered", "read", { path: "~/.bashrc" }, false);
+// The words a blocked call gives back are what the user and the model read; Pi has said it this way
+// since the first version.
+const blockedWords = String((await handlers.tool_call({ toolName: "bash", input: { command: "rm -rf /" } }, { cwd: project, hasUI: false, ui }))?.reason);
+check("x", { action: blockedWords.startsWith("Blocked by pi-automode-classifier:") ? "x" : blockedWords }, "handler: a blocked call names the guard as Pi always did");
 await handle("block", "read tool on a credential file", "read", { path: "~/.aws/credentials" }, false);
 await handle("block", "read tool on a key in a folder with spaces", "read", { path: "~/My Keys/id_rsa" }, false);
 await handle("run", "read tool on a public key", "read", { path: "~/.ssh/id_ed25519.pub" }, false);

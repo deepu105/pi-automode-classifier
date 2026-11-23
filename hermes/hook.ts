@@ -5,6 +5,7 @@
 
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 import { loadConfig } from "../core/config.ts";
 import { createGuard, emptyState, type Decision } from "../core/guard.ts";
 import { loadState, saveState, sessionFile } from "../core/session.ts";
@@ -37,6 +38,10 @@ async function run(request: HookRequest): Promise<HookAnswer> {
     config,
     {
       product: "Hermes",
+      blockedBy: "the auto mode guard",
+      // One attempt per 30 s to start a local classifier server, shared by this session's processes:
+      // every call here is a new process, and a model that takes a minute to load must load once.
+      startMarker: path.join(path.dirname(request.config), "server-start"),
       guarded: request.guarded ?? [],
       ownDirs: request.ownDirs ?? [],
       log: (entry) => appendLog(request.log, config.log, entry),

@@ -3,6 +3,7 @@
 // Nothing here imports a host: the registry a provider needs is passed in.
 
 import { spawn, type ChildProcess } from "node:child_process";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { buildTranscript, type Outcome, type TranscriptItem } from "../automode.ts";
@@ -47,11 +48,35 @@ export async function health(config: Config, timeoutMs: number): Promise<boolean
 }
 
 let lastStart = 0;
+const START_COOLDOWN_MS = 30_000;
+
+// The turn to start the classifier server: false when someone already did it within `ms`. With a
+// marker file the clock is that file, so a host that decides every call in a new process (Hermes)
+// starts a slow local server once instead of once per call. Without one the clock is this process.
+export function takeStartTurn(file: string, ms = START_COOLDOWN_MS): boolean {
+  if (!file) {
+    const free = Date.now() - lastStart >= ms;
+    if (free) lastStart = Date.now();
+    return free;
+  }
+  try {
+    if (Date.now() - fs.statSync(file).mtimeMs < ms) return false;
+  } catch {
+    // No marker yet: nobody started the server.
+  }
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, new Date().toISOString());
+  } catch {
+    // A marker that cannot be written costs one extra start attempt, nothing more.
+  }
+  return true;
+}
+
 // Runs startCommand and waits until the endpoint answers. At most one attempt per 30 s.
-export async function startServer(config: Config, waitMs: number): Promise<boolean> {
+export async function startServer(config: Config, waitMs: number, marker = ""): Promise<boolean> {
   const { startCommand } = config.classifier;
-  if (!startCommand.length || Date.now() - lastStart < 30_000) return false;
-  lastStart = Date.now();
+  if (!startCommand.length || !takeStartTurn(marker)) return false;
   spawn(startCommand[0], startCommand.slice(1), { stdio: "ignore", detached: true })
     .on("error", () => {})
     .unref();
@@ -210,7 +235,17 @@ export function classifierState(
 }
 
 // The answer of the classifier decider, or of the classifier process for "command".
-export async function classify(config: Config, state: Record<string, string>, signal?: AbortSignal, registry?: Registry, stage = firstScorer(config)): Promise<Classified> {
+export async function classify(
+  config: Config,
+  state: Record<string, string>,
+  signal?: AbortSignal,
+  registry?: Registry,
+  stage = firstScorer(config),
+  // The host's own name, and where it keeps the server-start marker. Pi is the host this core grew
+  // up with, so it is the name a missing one falls back to.
+  host: { product?: string; startMarker?: string } = {},
+): Promise<Classified> {
+  const product = host.product ?? "Pi";
   if (stage === "command") return askClassifierProcess(config, state, signal);
   const started = performance.now();
   const ms = () => Math.round(performance.now() - started);
@@ -223,9 +258,9 @@ export async function classify(config: Config, state: Record<string, string>, si
     // LlamaStash: the host lists no classifier there, so the request goes to <baseUrl>/systemone
     // with the provider's own key.
     const base = registry?.getProvider?.(provider)?.baseUrl;
-    if (!registry || !base) return { error: `no classifier model ${provider}/${expected} is set up`, ms: ms() };
+    if (!registry || !base) return { error: `${product} has no classifier model ${provider}/${expected}`, ms: ms() };
     const key = await registry.getApiKeyForProvider?.(provider);
-    return systemOne(config, `${base.replace(/\/+$/, "")}/systemone`, key ? { Authorization: `Bearer ${key}` } : {}, state, signal, started);
+    return systemOne(config, `${base.replace(/\/+$/, "")}/systemone`, key ? { Authorization: `Bearer ${key}` } : {}, state, signal, started, host.startMarker);
   }
   if (provider) {
     const questions = buildQuestions(config);
@@ -238,11 +273,11 @@ export async function classify(config: Config, state: Record<string, string>, si
     const answers = readAnswers(config, ids, result.answers);
     return answers ? { answers, ms: ms(), tokens: result.usage?.input } : { error: "invalid response from the model", ms: ms() };
   }
-  return systemOne(config, `${endpoint}/v1/systemone`, {}, state, signal, started);
+  return systemOne(config, `${endpoint}/v1/systemone`, {}, state, signal, started, host.startMarker);
 }
 
 // One request to a System One endpoint. Only the local `endpoint` gets its server started.
-async function systemOne(config: Config, url: string, headers: Record<string, string>, state: Record<string, string>, signal: AbortSignal | undefined, started: number): Promise<Classified> {
+async function systemOne(config: Config, url: string, headers: Record<string, string>, state: Record<string, string>, signal: AbortSignal | undefined, started: number, marker = ""): Promise<Classified> {
   const ms = () => Math.round(performance.now() - started);
   const questions = buildQuestions(config, false);
   const ids = Object.keys(questions);
@@ -271,7 +306,7 @@ async function systemOne(config: Config, url: string, headers: Record<string, st
     } catch (e) {
       const err = e as Error & { cause?: { code?: string } };
       if (err.name === "TimeoutError") return { error: `no answer in ${timeoutMs} ms`, ms: ms() };
-      if (local && attempt === 0 && err.cause?.code === "ECONNREFUSED" && (await startServer(config, timeoutMs))) continue;
+      if (local && attempt === 0 && err.cause?.code === "ECONNREFUSED" && (await startServer(config, timeoutMs, marker))) continue;
       return { error: `server not reachable at ${new URL(url).origin}`, ms: ms() };
     }
   }
