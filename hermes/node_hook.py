@@ -111,16 +111,22 @@ def budget_s(config: dict) -> float:
 def run_guard(request: dict, timeout_s: float) -> dict:
     """One guard run. Raises when node is missing, late, or answers with something unreadable."""
     argv = [node_binary(), "--disable-warning=ExperimentalWarning", str(guard_path())]
-    proc = subprocess.run(
-        argv,
-        input=json.dumps(request),
-        capture_output=True,
-        text=True,
-        timeout=timeout_s,
-    )
-    line = next((l for l in reversed(proc.stdout.splitlines()) if l.strip()), "")
+    # Popen, not subprocess.run: on a timeout that one kills with SIGKILL, which can cut a session
+    # state file between the write and the rename. Here the child gets one SIGTERM and node, which
+    # installs no handler for it, goes.
+    proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        out, err = proc.communicate(input=json.dumps(request), timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+        try:
+            proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass  # a child that ignores SIGTERM is left alone; nothing here may force it
+        raise RuntimeError(f"the guard did not answer in {timeout_s:g} s")
+    line = next((l for l in reversed(out.splitlines()) if l.strip()), "")
     if not line:
-        raise RuntimeError(f"the guard printed nothing (exit {proc.returncode}): {proc.stderr.strip()[:300]}")
+        raise RuntimeError(f"the guard printed nothing (exit {proc.returncode}): {err.strip()[:300]}")
     answer = json.loads(line)
     if not isinstance(answer, dict) or answer.get("action") not in ("allow", "approve", "block", "status"):
         raise RuntimeError(f"the guard answered {line[:200]}")

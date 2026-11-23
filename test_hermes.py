@@ -356,6 +356,26 @@ class Wrapper(unittest.TestCase):
             self.nh.run_guard = real
         self.assertEqual(answer["action"], "approve")
 
+    def test_a_guard_that_is_late_gets_one_sigterm(self):
+        """A node child this side gave up on is asked to stop, not killed: a kill can cut a state
+        file between the write and the rename."""
+        script = FIXTURE / "late-guard.js"
+        script.write_text(
+            'const fs = require("fs");\n'
+            'process.on("SIGTERM", () => { fs.writeFileSync(process.env.STOP_LOG, "term"); process.exit(0); });\n'
+            "setTimeout(() => {}, 60000);\n"
+        )
+        stopped = FIXTURE / "stopped"
+        real = self.nh.guard_path
+        self.nh.guard_path = lambda: script
+        with patch_env({"STOP_LOG": str(stopped)}):
+            try:
+                with self.assertRaises(RuntimeError):
+                    self.nh.run_guard({"mode": "decide"}, 0.5)
+            finally:
+                self.nh.guard_path = real
+        self.assertTrue(stopped.exists(), "the child was killed instead of asked to stop")
+
     def test_a_status_that_fails_says_so(self):
         real = self.nh.run_guard
         self.nh.run_guard = lambda request, timeout_s: (_ for _ in ()).throw(RuntimeError("node is gone"))
