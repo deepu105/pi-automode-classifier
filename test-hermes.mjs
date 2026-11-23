@@ -164,9 +164,12 @@ await new Promise((done) => server.close(done));
 const home = os.homedir();
 // Not under a temp directory: the rules treat those as scratch space.
 const fixture = path.join(home, "pi-automode-classifier-hermes-test");
-const workspace = path.join(fixture, "workspace");
 const automode = path.join(fixture, "automode-classifier");
+// A project folder outside the home: the whole home is what a session may not change on its own.
+const workspace = path.join(home, "pi-automode-classifier-hermes-work");
+const outside = path.join(home, "pi-automode-classifier-hermes-outside");
 fs.rmSync(fixture, { recursive: true, force: true });
+fs.rmSync(workspace, { recursive: true, force: true });
 fs.mkdirSync(workspace, { recursive: true });
 fs.mkdirSync(automode, { recursive: true });
 const configFile = path.join(automode, "config.json");
@@ -198,7 +201,7 @@ const askAsync = (request) =>
     });
     proc.stdin.end(JSON.stringify(request));
   });
-const request = (tool, input, extra = {}) => ({ mode: "decide", config: configFile, example: path.join(repo, "config.example.jsonc"), log: logFile, guarded: [automode], ownDirs: [path.join(fixture, "plugins")], hasUI: true, tool, input, cwd: workspace, history: [{ role: "user", content: "do it" }], ...extra });
+const request = (tool, input, extra = {}) => ({ mode: "decide", config: configFile, example: path.join(repo, "config.example.jsonc"), log: logFile, guarded: [automode], ownDirs: [fixture], hasUI: true, tool, input, cwd: workspace, history: [{ role: "user", content: "do it" }], ...extra });
 const decide = (tool, input, extra = {}) => ask(request(tool, input, extra));
 const decideAsync = async (tool, input, extra = {}) => askAsync(request(tool, input, extra));
 const decisions = () => (fs.existsSync(logFile) ? fs.readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
@@ -241,7 +244,6 @@ check("on for this session decides as usual", decide("terminal", { command: "git
 check("a read of a credential file asks", decide("read_file", { path: path.join(workspace, ".env") }).action, "approve");
 // `workdir` is the model's own: it must not turn that folder into the project, where every write
 // in it would run by rule.
-const outside = path.join(fixture, "elsewhere");
 fs.mkdirSync(outside, { recursive: true });
 check("a workdir outside the session does not make its writes local", decide("terminal", { command: "echo hi > evil.txt", workdir: outside }).action, "approve");
 check("a workdir that is the session folder runs", decide("terminal", { command: "echo hi > ok.txt", workdir: workspace }), { action: "allow" });
@@ -250,6 +252,11 @@ check("text sent to a running process is judged", decide("process_manage", { act
 check("reading a process log runs", decide("process_manage", { action: "log", session_id: "proc_1" }), { action: "allow" });
 check("a process_manage action the guard does not know asks", decide("process_manage", { action: "frobnicate", session_id: "proc_1" }).action, "approve");
 check("a path the rules do not reach runs", decide("read_file", { path: path.join(workspace, "notes.md") }), { action: "allow" });
+// The whole Hermes home is the product's own files: `memory`, `skill_manage` and a cron script
+// reach a file without naming the folder, and a change there sets what every later session does.
+for (const name of ["memories/MEMORY.md", "skills/notes/SKILL.md", "scripts/nightly.sh"]) {
+  ok(`a write to this home's ${name} is held as the product's own file`, String(decide("write_file", { path: path.join(fixture, name), content: "x" }).message).includes("own files"), name);
+}
 
 // A model that cannot answer fails closed: the call goes to the approval gate.
 writeConfig({ decider: ["classifier", "llm"], classifier: { provider: "gone", model: "m" }, llm: { provider: "gone", model: "m", contextWindow: 131072 }, providers: {} });

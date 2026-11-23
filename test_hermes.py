@@ -24,6 +24,9 @@ from unittest import mock
 REPO = Path(__file__).resolve().parent
 # Not under a temp directory: the rules treat those as scratch space.
 FIXTURE = Path.home() / "pi-automode-classifier-hermes-py-test"
+# The session works in a project folder, not inside the Hermes home: the whole home is what a
+# session must not change on its own.
+WORKSPACE = Path.home() / "pi-automode-classifier-hermes-py-work"
 
 
 def load_plugin():
@@ -72,10 +75,11 @@ class Wrapper(unittest.TestCase):
 
     def setUp(self):
         shutil.rmtree(FIXTURE, ignore_errors=True)
+        shutil.rmtree(WORKSPACE, ignore_errors=True)
         self.nh.SESSIONS._by_session.clear()  # one store is shared by the whole run: no test sees another's session
         (FIXTURE / "automode-classifier").mkdir(parents=True)
-        (FIXTURE / "workspace").mkdir()
-        self.workspace = FIXTURE / "workspace"
+        WORKSPACE.mkdir()
+        self.workspace = WORKSPACE
         self.config = FIXTURE / "automode-classifier" / "config.json"
         self.write_config({"decider": []})
         self.env = patch_env({"HERMES_HOME": str(FIXTURE), "HERMES_INTERACTIVE": "1", "HERMES_EXEC_ASK": "", "HERMES_CRON_SESSION": "", "HERMES_KANBAN_TASK": "", "HERMES_PLATFORM": ""})
@@ -87,6 +91,7 @@ class Wrapper(unittest.TestCase):
     def tearDown(self):
         self.env.__exit__(None, None, None)
         shutil.rmtree(FIXTURE, ignore_errors=True)
+        shutil.rmtree(WORKSPACE, ignore_errors=True)
 
     def write_config(self, obj):
         self.config.write_text(json.dumps(obj))
@@ -229,11 +234,33 @@ class Wrapper(unittest.TestCase):
         self.assertIn(str(REPO), locked)
         for name in ("config.yaml", ".env", "SOUL.md", "shell-hooks-allowlist.json"):
             self.assertIn(str(FIXTURE / name), locked)
-        self.assertEqual(request["ownDirs"], [str(FIXTURE / "plugins")])
+        self.assertEqual(request["ownDirs"], [str(FIXTURE)])
         self.assertEqual(
             request["paths"],
             {"skills": str(FIXTURE / "skills"), "memories": str(FIXTURE / "memories"), "scripts": str(FIXTURE / "scripts")},
         )
+
+    def test_every_profile_of_the_install_is_locked(self):
+        """One profile must not switch the guard off in another one."""
+        (FIXTURE / "profiles" / "generic" / "automode-classifier").mkdir(parents=True)
+        request, _ = self.plugin._request("s1", tool="terminal", args={"command": "ls"})
+        self.assertIn(str(FIXTURE / "profiles" / "generic" / "automode-classifier"), request["guarded"])
+        self.assertIn(str(FIXTURE / "profiles" / "generic" / "config.yaml"), request["guarded"])
+
+    def test_a_write_to_another_profiles_guard_config_is_locked(self):
+        other = FIXTURE / "profiles" / "generic" / "automode-classifier"
+        other.mkdir(parents=True)
+        (other / "config.json").write_text("{}")
+        answer = self.ctx.guard("write_file", {"path": str(other / "config.json"), "content": '{"enabled": false}'})
+        self.assertEqual(answer["action"], "approve")
+        self.assertIn("guard's own files", answer["message"], answer["message"])
+
+    def test_a_note_and_a_script_of_this_home_are_the_products_own_files(self):
+        """`memory` and a cron script name no folder the rules saw; the home is what they change."""
+        for name in ("memories/MEMORY.md", "scripts/nightly.sh", "skills/notes/SKILL.md"):
+            answer = self.ctx.guard("write_file", {"path": str(FIXTURE / name), "content": "x"})
+            self.assertEqual(answer["action"], "approve", name)
+            self.assertIn("Hermes's own files", answer["message"], name)
 
     def test_a_skill_change_is_judged_as_a_change_in_the_skills_folder(self):
         """`skill_manage` names a skill, not a path: the folder it writes in is what gets judged."""

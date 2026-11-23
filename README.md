@@ -828,7 +828,7 @@ Hermes runs Python and the guard is TypeScript, so `hermes/plugin.py` registers 
 
 `llm.warmCache` works here too. The first hook of a session (`on_session_start`, or the first turn's `pre_llm_call` if that is what Hermes fires) starts one throwaway chat call in its own process and walks away, so the turn never waits for it. A marker file (`sessions/<session id>.warm`) makes it one call per session.
 
-Because each call is its own process, one session's state lives in a file: `<profile home>/automode-classifier/sessions/<session id>.json`. It holds what the session wrote and downloaded, the counts `status` prints, and the denial counts, and it is the same state Pi keeps in memory (`GuardState` in [`core/guard.ts`](core/guard.ts)). Two calls of one session can run at once, so a save merges the change each call made under a lock file. A session nobody used for 7 days is deleted.
+Because each call is its own process, one session's state lives in a file: `<profile home>/automode-classifier/sessions/<session id>.json`. It holds what the session wrote and downloaded, the git checkouts the session started with, the outcome of each call the guard held back, the counts `status` prints, and the denial counts, and it is the same state Pi keeps in memory (`GuardState` in [`core/guard.ts`](core/guard.ts)). A save writes back only what its own call changed, so two calls of one session cannot undo each other's marks. A session nobody used for 7 days is deleted.
 
 ### Install
 
@@ -889,7 +889,7 @@ Or run the installer a second time, which pulls the source, copies it into every
 | Pi's own files: `~/.pi/agent`, any `.pi` folder, `AGENTS.md` | the profile's `plugins/` folder, which asks like Pi's own files. `SOUL.md` and `config.yaml` are stricter, like `settings.json` |
 | `~/.pi/agent/extensions/pi-automode-classifier/config.json` | `<profile home>/automode-classifier/config.json` |
 | `~/.local/state/pi-automode-classifier/decisions.jsonl` | `<profile home>/automode-classifier/decisions.jsonl` |
-| the guard's in-memory session (file origins, counts, denials) | `<profile home>/automode-classifier/sessions/<session id>.json`, because each call is a new process; deleted after 7 days idle |
+| the guard's session state (file origins, first-seen git checkouts, call outcomes, counts, denials) | `<profile home>/automode-classifier/sessions/<session id>.json`, because each call is a new process; deleted after 7 days idle |
 | `/automode-classifier status`, `on`, `off` | the same command, the same rows, the session counts included (they come from that session's state file) |
 | Stage 3 on the session's own model | an endpoint you name: `llm.provider` plus `providers`. Hermes hands a plugin no handle on the session's model |
 | Stage 2 through Pi's model registry | `classifier.provider` plus `providers`, or the local endpoint with `classifier.endpoint` and `startCommand`, which work the same in both |

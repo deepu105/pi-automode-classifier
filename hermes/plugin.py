@@ -68,23 +68,33 @@ def _profile_home() -> Path:
     return base
 
 
+def _homes(home: Path) -> list[Path]:
+    """This Hermes home, the install home above a profile home, and every profile home there."""
+    base = home
+    while base.parent.name == "profiles":
+        base = base.parent.parent
+    return [base, *sorted(one for one in (base / "profiles").glob("*") if one.is_dir())]
+
+
+# One home's files that decide what a session may do. A change to any of them is locked: no rule
+# and no decider opens them.
+_LOCKED = ("automode-classifier", "plugins/automode-classifier", "config.yaml", ".env", "SOUL.md", "shell-hooks-allowlist.json")
+
+
 def _paths(home: Path) -> tuple[list[str], list[str], dict[str, str]]:
     """Locked paths, the paths that name this product, and the folders the tools write in.
 
     The last group is for the tools that reach a file without giving a path the rules can read:
     ``skill_manage`` names a skill, ``memory`` a note, and a cron script is relative to
     ``<home>/scripts/``. See hermes/tools.ts and core/guard.ts.
+
+    Every home of this install is locked, not just the one this call reads: from one profile a model
+    can otherwise write another profile's guard config and switch the guard off there.
     """
-    automode = home / "automode-classifier"
-    locked = [
-        str(_PLUGIN_DIR),
-        str(automode),
-        str(home / "config.yaml"),
-        str(home / ".env"),
-        str(home / "SOUL.md"),
-        str(home / "shell-hooks-allowlist.json"),
-    ]
-    return locked, [str(home / "plugins")], {"skills": str(home / "skills"), "memories": str(home / "memories"), "scripts": str(home / "scripts")}
+    locked = [str(_PLUGIN_DIR)]
+    for one in _homes(home):
+        locked += [str(one / name) for name in _LOCKED]
+    return list(dict.fromkeys(locked)), [str(home)], {"skills": str(home / "skills"), "memories": str(home / "memories"), "scripts": str(home / "scripts")}
 
 
 def approval_possible(platform: str) -> bool:
