@@ -338,7 +338,13 @@ export function createGuard(config: Config, host: GuardHost, initial?: GuardStat
         return { action: "block", by: "no-ui", reason: `This needs the user's approval (${verdict.reason}) and there is no UI to ask. Do not work around it. Tell the user.` };
       }
       // A host with a way to ask that does not show prompts itself (Hermes hands the ask back).
-      if (!session.ask) return { action: "ask", reason: verdict.reason, tool: request.tool, subject, key };
+      if (!session.ask) {
+        // The person may still approve this call, so keep what it would write: a script the session
+        // wrote has to read that way when a later call runs it. A call that is then declined leaves
+        // a mark too many, which only costs one more check later.
+        commitWrites(scope);
+        return { action: "ask", reason: verdict.reason, tool: request.tool, subject, key };
+      }
 
       counts.asked++;
       // While the config file is ignored every prompt says so, since the defaults decide differently.

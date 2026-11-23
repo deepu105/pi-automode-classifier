@@ -291,6 +291,14 @@ fs.writeFileSync(downloaded, "#!/bin/sh\necho downloaded\n");
 writeConfig({ decider: [], rules: { allow: ["curl *"] } });
 check("a download your own rule allows runs", decide("terminal", { command: `curl -o ${downloaded} http://example.com/x.sh` }, same), { action: "allow" });
 check("the state file records the download", stateOf("one-session").files[downloaded], "fetched");
+writeConfig({ decider: [] });
+// An ask goes to Hermes' own approval gate: the person may allow it, so what the call would write
+// has to be kept. Otherwise a script this session wrote reads to a later call like any other file.
+const madeFile = path.join(outside, "made.sh");
+const heldWrite = decide("write_file", { path: madeFile, content: "#!/bin/sh\necho hi\n" }, { session: "approved-ask", sessions });
+check("the write goes to the approval gate", heldWrite.action, "approve");
+check("and the file it would write is kept as this session's", stateOf("approved-ask").files[madeFile], "authored");
+
 check("and counts the call it decided", stateOf("one-session").counts.rule, 1);
 const runsDownload = decide("terminal", { command: "./downloaded.sh" }, same);
 ok("a later call that runs it asks, and says where it came from", runsDownload.action === "approve" && String(runsDownload.message).includes("downloaded in this session"), JSON.stringify(runsDownload));
