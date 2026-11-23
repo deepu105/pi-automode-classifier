@@ -7,13 +7,21 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import type { Outcome } from "../automode.ts";
 import { emptyState, type GuardState } from "./guard.ts";
 
 // A session nobody has used for this long is deleted; its next call starts fresh.
 export const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_FILES = 400; // entries kept in the file-origin map; the oldest go first
+const MAX_KEYS = 400; // the same, for the outcome of each call
 const LOCK_WAIT_MS = 2000;
 const LOCK_STALE_MS = 30_000; // a lock older than this is from a process that died holding it
+
+// What one call changed since it read the file: a key it added or moved. Its base snapshot holds
+// every key another call wrote earlier, and writing all of them back would undo a parallel call
+// that saved before it.
+const changed = <T>(now: Record<string, T>, base: Record<string, T>): Record<string, T> =>
+  Object.fromEntries(Object.entries(now).filter(([key, value]) => base[key] !== value));
 
 export interface StoredState extends GuardState {
   updated: number;
@@ -35,7 +43,15 @@ export function loadState(file: string): GuardState {
     return emptyState();
   }
   const files = stored.files && typeof stored.files === "object" ? stored.files : {};
-  return { files, counts: { ...emptyState().counts, ...(stored.counts ?? {}) }, denials: { ...emptyState().denials, ...(stored.denials ?? {}) } };
+  const roots: Record<string, string[]> = {};
+  if (stored.roots && typeof stored.roots === "object") {
+    for (const [dir, list] of Object.entries(stored.roots)) if (Array.isArray(list)) roots[dir] = list.filter((one) => typeof one === "string");
+  }
+  const outcomes: Record<string, Outcome> = {};
+  if (stored.outcomes && typeof stored.outcomes === "object") {
+    for (const [id, value] of Object.entries(stored.outcomes)) if (typeof value === "string") outcomes[id] = value as Outcome;
+  }
+  return { files, roots, outcomes, counts: { ...emptyState().counts, ...(stored.counts ?? {}) }, denials: { ...emptyState().denials, ...(stored.denials ?? {}) } };
 }
 
 // `now` started life as `base` and ended here, so what it added is what the file gains. Counters
@@ -43,11 +59,17 @@ export function loadState(file: string): GuardState {
 // winning where both name the same file.
 export function mergeState(stored: GuardState, base: GuardState, now: GuardState): GuardState {
   const change = (get: (s: GuardState) => number) => Math.max(0, get(stored) + (get(now) - get(base)));
-  const merged = { ...stored.files, ...now.files };
+  const merged = { ...stored.files, ...changed(now.files, base.files) };
   const keys = Object.keys(merged);
   const files = keys.length > MAX_FILES ? Object.fromEntries(keys.slice(-MAX_FILES).map((k) => [k, merged[k]])) : merged;
+  const outcomes = { ...stored.outcomes, ...changed(now.outcomes, base.outcomes) };
+  const kept = Object.keys(outcomes);
+  // Roots only ever grow inside one session, and a parallel call can only have seen a part of them.
+  const roots = Object.fromEntries([...new Set([...Object.keys(stored.roots), ...Object.keys(now.roots)])].map((dir) => [dir, [...new Set([...(stored.roots[dir] ?? []), ...(now.roots[dir] ?? [])])]]));
   return {
     files,
+    roots,
+    outcomes: kept.length > MAX_KEYS ? Object.fromEntries(kept.slice(-MAX_KEYS).map((k) => [k, outcomes[k]])) : outcomes,
     counts: {
       rule: change((s) => s.counts.rule),
       model: change((s) => s.counts.model),

@@ -87,11 +87,16 @@ export type Decision =
 // keeps one process (Pi) leaves `initial` out and keeps it in memory. See core/session.ts.
 export interface GuardState {
   files: Record<string, Origin>;
+  // The git checkouts of each working directory, as this session first saw them. See core/guard.ts.
+  roots: Record<string, string[]>;
+  // How each call ended, by tool call id, so the next call's decider sees a held-back call as
+  // held back. Pi keeps this in memory; a host that starts fresh each call keeps it here.
+  outcomes: Record<string, Outcome>;
   counts: GuardStatus["counts"];
   denials: GuardStatus["denials"];
 }
 
-export const emptyState = (): GuardState => ({ files: {}, counts: { rule: 0, model: 0, asked: 0, blocked: 0 }, denials: { consecutive: 0, total: 0 } });
+export const emptyState = (): GuardState => ({ files: {}, roots: {}, outcomes: {}, counts: { rule: 0, model: 0, asked: 0, blocked: 0 }, denials: { consecutive: 0, total: 0 } });
 
 export interface GuardStatus {
   enabled: boolean;
@@ -140,10 +145,13 @@ export function createGuard(config: Config, host: GuardHost, initial?: GuardStat
   const files: SessionFiles = new Map(Object.entries(initial?.files ?? {}) as [string, Origin][]);
   // Git checkouts per working directory, as they were when the session first used it. A worktree
   // added later counts only inside the folder that holds the main checkout, so `git worktree add`
-  // cannot open an arbitrary folder.
-  const repositories = new Map<string, string[]>();
-  // Calls this guard held back, by tool call id, for the outcome lines the decider reads.
-  const decided = new Map<string, Outcome>();
+  // cannot open an arbitrary folder. A host that decides every call in a fresh process keeps these
+  // in its session state, or every call would see the worktrees that exist right now as trusted.
+  const repositories = new Map<string, string[]>(Object.entries(initial?.roots ?? {}).map(([dir, list]) => [dir, [...list]]));
+  // Calls this guard held back, by tool call id, for the outcome lines the decider reads. A host
+  // that decides every call in a fresh process loads them with the rest of the state, or a call one
+  // decision held back would read as a call that ran.
+  const decided = new Map<string, Outcome>(Object.entries(initial?.outcomes ?? {}));
   // Tool calls of one message run in parallel; show one prompt at a time.
   let prompts: Promise<unknown> = Promise.resolve();
 
@@ -155,7 +163,7 @@ export function createGuard(config: Config, host: GuardHost, initial?: GuardStat
       return { enabled, counts, denials, rules: { deny: rules.ui.deny.length, ask: rules.ui.ask.length, classify: rules.ui.classify.length, allow: rules.ui.allow.length }, allowedPaths };
     },
     state() {
-      return { files: Object.fromEntries(files), counts: { ...counts }, denials: { ...denials } };
+      return { files: Object.fromEntries(files), roots: Object.fromEntries(repositories), outcomes: Object.fromEntries(decided), counts: { ...counts }, denials: { ...denials } };
     },
     async evaluate(request) {
       const session = request.session;

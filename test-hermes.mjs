@@ -267,9 +267,10 @@ const stateOf = (id) => JSON.parse(fs.readFileSync(path.join(sessions, `${id}.js
 let chatAnswer = "<block>no</block>";
 const chatRequests = [];
 const chatServer = http.createServer((req, res) => {
-  req.on("data", () => undefined);
+  let body = "";
+  req.on("data", (chunk) => (body += chunk));
   req.on("end", () => {
-    chatRequests.push(req.url);
+    chatRequests.push({ url: req.url, body });
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify({ choices: [{ message: { content: chatAnswer }, finish_reason: "stop" }] }));
   });
@@ -311,6 +312,20 @@ check("the first denial blocks", (await decideAsync("terminal", { command: "git 
 check("the second reaches the cap, so a person is asked", (await decideAsync("terminal", { command: "git push origin two" }, capped)).action, "approve");
 check("the state file holds the denials", stateOf("capped").denials, { consecutive: 2, total: 2 });
 check("another session starts the count again", (await decideAsync("terminal", { command: "git push origin two" }, { ...capped, session: "uncapped" })).action, "block");
+
+// A call the guard held back must not read to the next call as a call that ran: each call is a new
+// process, and the only thing that carries over is the session state.
+writeConfig(llmConfig({ maxTotalDenials: 100, maxConsecutiveDenials: 100 }));
+const heldCall = await decideAsync("terminal", { command: "rm -rf /" }, { session: "held-back", sessions, toolCallId: "tc-1" });
+check("the held-back call is blocked", heldCall.action, "block");
+check("and its outcome is kept for the next call", stateOf("held-back").outcomes?.["tc-1"], "blocked-by-permissions");
+const heldHistory = [
+  { role: "user", content: "do it" },
+  { role: "assistant", content: "", tool_calls: [{ id: "tc-1", type: "function", function: { name: "terminal", arguments: JSON.stringify({ command: "rm -rf /" }) } }] },
+  { role: "tool", tool_call_id: "tc-1", name: "terminal", content: '{"error":"no"}' },
+];
+await decideAsync("terminal", { command: "git push origin main" }, { session: "held-back", sessions, providers: chatProvider, history: heldHistory });
+ok("the next call's decider is told it was held back, not that it ran", String(chatRequests.at(-1)?.body).includes("Outcome: blocked-by-permissions"), String(chatRequests.at(-1)?.body).slice(0, 400));
 writeConfig(llmConfig({ maxConsecutiveDenials: 1 }));
 check("a run of one denial is enough when that is the cap", (await decideAsync("terminal", { command: "git push origin three" }, { ...capped, session: "once" })).action, "approve");
 chatAnswer = "<block>no</block>";
@@ -323,7 +338,37 @@ const longAgo = new Date(Date.now() - week);
 fs.utimesSync(stale, longAgo, longAgo);
 decide("terminal", { command: "ls" }, same);
 ok("a session idle for over a week is deleted", !fs.existsSync(stale));
-check("two parallel calls of one session add up instead of overwriting", mergeState({ files: { b: "fetched" }, counts: { rule: 1, model: 1, asked: 0, blocked: 0 }, denials: { consecutive: 1, total: 1 } }, { files: {}, counts: { rule: 1, model: 0, asked: 0, blocked: 0 }, denials: { consecutive: 0, total: 0 } }, { files: { a: "authored" }, counts: { rule: 2, model: 0, asked: 0, blocked: 0 }, denials: { consecutive: 1, total: 1 } }), { files: { b: "fetched", a: "authored" }, counts: { rule: 2, model: 1, asked: 0, blocked: 0 }, denials: { consecutive: 2, total: 2 } });
+const stateWith = (over = {}) => ({ files: {}, roots: {}, outcomes: {}, counts: { rule: 0, model: 0, asked: 0, blocked: 0 }, denials: { consecutive: 0, total: 0 }, ...over });
+check("two parallel calls of one session add up instead of overwriting", mergeState(stateWith({ files: { b: "fetched" }, roots: { "/x": ["/x"] }, counts: { rule: 1, model: 1, asked: 0, blocked: 0 }, denials: { consecutive: 1, total: 1 } }), stateWith({ counts: { rule: 1, model: 0, asked: 0, blocked: 0 }, denials: { consecutive: 0, total: 0 } }), stateWith({ files: { a: "authored" }, roots: { "/y": ["/y"] }, counts: { rule: 2, model: 0, asked: 0, blocked: 0 }, denials: { consecutive: 1, total: 1 } })), stateWith({ files: { b: "fetched", a: "authored" }, roots: { "/x": ["/x"], "/y": ["/y"] }, counts: { rule: 2, model: 1, asked: 0, blocked: 0 }, denials: { consecutive: 2, total: 2 } }));
+check(
+  "a parallel save does not write an older file origin back",
+  mergeState(stateWith({ files: { "run.sh": "fetched" } }), stateWith({ files: { "run.sh": "authored" } }), stateWith({ files: { "run.sh": "authored" } })),
+  stateWith({ files: { "run.sh": "fetched" } }),
+);
+// Worktrees added after the session's first call: the snapshot of the checkouts has to come back
+// with the session state, because every Hermes call is a new process. Without it every worktree
+// that exists now looks trusted, and `git worktree add <anywhere>` opens that folder.
+{
+  const box = fs.mkdtempSync(path.join(home, "pi-automode-classifier-late-"));
+  const repo = path.join(box, "main");
+  fs.mkdirSync(repo);
+  const git = (...args) => {
+    const ran = spawnSync("git", ["-C", repo, ...args], { encoding: "utf8" });
+    if (ran.status !== 0) throw new Error(`git ${args.join(" ")}: ${ran.stderr}`);
+  };
+  git("init", "-q", "-b", "main");
+  git("-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init");
+  const there = { session: "worktrees", sessions, cwd: repo };
+  check("a first call in a fresh checkout runs", decide("terminal", { command: "ls" }, there), { action: "allow" });
+  const near = path.join(box, ".worktrees", "near");
+  const far = path.join(box + "-far");
+  git("worktree", "add", "-q", "-b", "near", near);
+  git("worktree", "add", "-q", "-b", "far", far);
+  check("a worktree added later next to the checkout counts", decide("terminal", { command: `echo hi > ${path.join(near, "n.txt")}` }, there), { action: "allow" });
+  ok("a worktree added later elsewhere does not run", decide("terminal", { command: `echo hi > ${path.join(far, "n.txt")}` }, there).action !== "allow", "it ran");
+  fs.rmSync(box, { recursive: true, force: true });
+  fs.rmSync(far, { recursive: true, force: true });
+}
 // The warming call: one throwaway chat request, and an answer that decides nothing.
 writeConfig(llmConfig());
 const chatBefore = chatRequests.length;
