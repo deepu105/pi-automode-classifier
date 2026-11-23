@@ -142,7 +142,7 @@ const isTimeout = (v: unknown) => typeof v === "number" && v > 0 && v <= 2_147_4
 // A prompt timeout of 0 means no timeout.
 const isTimeoutOrOff = (v: unknown) => v === 0 || isTimeout(v);
 const isProviders = (v: unknown) =>
-  isObject(v) && Object.entries(v).every(([name, p]) => isString(name) && isObject(p) && Object.keys(p).every((k) => ["baseUrl", "apiKeyEnv"].includes(k)) && isString(p.baseUrl) && URL.canParse(p.baseUrl) && isString(p.apiKeyEnv));
+  isObject(v) && Object.entries(v).every(([, p]) => isObject(p) && Object.keys(p).every((k) => ["baseUrl", "apiKeyEnv"].includes(k)) && isString(p.baseUrl) && URL.canParse(p.baseUrl) && isString(p.apiKeyEnv));
 const isQuestion = (v: unknown) =>
   typeof v === "string" ||
   (isObject(v) &&

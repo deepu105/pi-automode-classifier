@@ -287,7 +287,7 @@ export function createGuard(config: Config, host: GuardHost): Guard {
         held("blocked-by-permissions");
         finish("block", "rule");
         session.notify?.(`Blocked ${request.tool}: ${verdict.reason}`, "warning");
-        return { action: "block", by: "rule", reason: `Blocked by pi-automode-classifier: ${verdict.reason}. Do not retry it or work around it. Tell the user it was blocked.` };
+        return { action: "block", by: "rule", reason: `Blocked by the auto mode guard: ${verdict.reason}. Do not retry it or work around it. Tell the user it was blocked.` };
       }
 
       if (sessionAllowed.has(key)) {

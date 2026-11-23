@@ -24,4 +24,7 @@ jobs:
       # No install: the package has no dependencies, and the only Pi import is
       # `import type`, which Node strips before running.
       - run: node --version
-      - run: node test.mjs
+      - run: python3 --version
+      # test.mjs checks the rules and the Pi handler, test-hermes.mjs the Hermes
+      # wrapper's TypeScript, test_hermes.py its Python.
+      - run: npm test

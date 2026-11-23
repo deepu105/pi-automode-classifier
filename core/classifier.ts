@@ -223,7 +223,7 @@ export async function classify(config: Config, state: Record<string, string>, si
     // LlamaStash: the host lists no classifier there, so the request goes to <baseUrl>/systemone
     // with the provider's own key.
     const base = registry?.getProvider?.(provider)?.baseUrl;
-    if (!registry || !base) return { error: `Pi has no classifier model ${provider}/${expected}`, ms: ms() };
+    if (!registry || !base) return { error: `no classifier model ${provider}/${expected} is set up`, ms: ms() };
     const key = await registry.getApiKeyForProvider?.(provider);
     return systemOne(config, `${base.replace(/\/+$/, "")}/systemone`, key ? { Authorization: `Bearer ${key}` } : {}, state, signal, started);
   }

@@ -38,7 +38,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node test.mjs",
+    "test": "node test.mjs && node test-hermes.mjs && python3 test_hermes.py",
     "bench": "node bench/run.mjs --stages classifier",
     "bench:llm": "node bench/run.mjs --stages llm --suites user-requests,bench-llm-cases",
     "bench:flow": "node bench/run.mjs --stages flow"

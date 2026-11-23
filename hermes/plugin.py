@@ -88,7 +88,8 @@ def approval_possible(platform: str) -> bool:
     programmatic platform. Cron and kanban runs have nobody to answer. Hermes denies an approval no
     one answers, so a session like this gets the config's `withoutUi` answer instead.
     """
-    if _truthy(os.environ.get("HERMES_CRON_SESSION")) or _truthy(os.environ.get("HERMES_KANBAN_TASK")):
+    # A cron run sets a flag; a kanban worker names the task it works on. Neither has a person.
+    if _truthy(os.environ.get("HERMES_CRON_SESSION")) or os.environ.get("HERMES_KANBAN_TASK"):
         return False
     if _truthy(os.environ.get("HERMES_INTERACTIVE")):
         return True
@@ -149,7 +150,9 @@ def _guard_tool_call(tool_name: str, args: dict, task_id: str = "", session_id: 
         return {"action": "block", "message": answer.get("message") or "blocked by auto mode"}
     if action == "approve":
         return {"action": "approve", "message": answer.get("message") or "auto mode needs your approval", "rule_key": answer.get("rule_key") or ""}
-    return None
+    if action == "allow":
+        return None
+    return {"action": "approve", "message": f"the guard answered {action}, which this wrapper does not know; approve only if you know this call is safe", "rule_key": f"automode:{tool_name}:guard-failed"}
 
 
 def _text_of(message) -> str:

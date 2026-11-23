@@ -339,7 +339,7 @@ const { classify } = await import("./index.ts");
   };
   check("x", { action: (await answer("k1")) === "0.4" && seen.url === "/v1/systemone" && seen.body.questions.risky.type === "noul" && seen.body.state.command === "mytool sync" ? "x" : JSON.stringify(seen) }, "provider: a chat provider gets <baseUrl>/systemone with its key");
   check("x", { action: (await answer("wrong")) === "unauthorized" ? "x" : "bad" }, "provider: a refused key is an error");
-  check("x", { action: /Pi has no classifier model nope\/lancet/.test(await answer("k1", { ...via, classifier: { ...via.classifier, provider: "nope" } })) ? "x" : "bad" }, "provider: an unknown provider is an error");
+  check("x", { action: /no classifier model nope\/lancet is set up/.test(await answer("k1", { ...via, classifier: { ...via.classifier, provider: "nope" } })) ? "x" : "bad" }, "provider: an unknown provider is an error");
   check("x", { action: /expects "kev"/.test(await answer("k1", { ...via, classifier: { ...via.classifier, model: "kev" } })) ? "x" : "bad" }, "provider: the served model name is checked");
   server.close();
 }

@@ -77,10 +77,10 @@ def guard_path() -> Path:
 def budget_s(config: dict) -> float:
     """Seconds to wait for one guard run, from the config's own stage timeouts."""
     try:
-        stage3 = float(config.get("llm", {}).get("timeoutMs", 45000)) / 1000
+        stage3 = float(config.get("llm", {}).get("timeoutMs", 60000)) / 1000
         if config.get("llm", {}).get("twoStage", True):
             stage3 *= 2
-        stage2 = float(config.get("classifier", {}).get("timeoutMs", 15000)) / 1000
+        stage2 = float(config.get("classifier", {}).get("timeoutMs", 5000)) / 1000
         stage2 += float(config.get("command", {}).get("timeoutMs", 5000)) / 1000
         return stage3 + stage2 + SLACK_S
     except Exception:
