@@ -12,6 +12,8 @@ The rules settle most calls. The default uses stages 1 and 3 and needs no setup,
 
 I built it because Pi runs every tool call without asking for approval, and I wanted something like Claude Code's auto mode. With a local model in stage 3, or only Kev, Laya or LANCET in stage 2, nothing leaves your machine. With a hosted model the decider's prompt and your messages go to that provider.
 
+The same guard also runs as a plugin for [Hermes](https://github.com/NousResearch/hermes-agent) agents, with its approval gate in place of the prompt: see [Hermes agents](#hermes-agents).
+
 It is not a sandbox. It guards the agent's tool calls. It doesn't guard `!` commands you type, and extensions run with your user's permissions. Read [Pi's security docs](https://pi.dev/docs/latest/security) for real isolation.
 
 ## Install
@@ -27,6 +29,8 @@ Or from a checkout: `pi install ./pi-automode-classifier`.
 That is all the default needs: stages 1 and 3, with the session's own model as stage 3. See [stage 3](#stage-3-the-chat-decider) for what that costs, [Using all three stages](#using-all-three-stages) to add a classifier, and [Configuration](#configuration) for every key.
 
 In a session, `/automode-classifier off` turns the guard off, `on` turns it back, and `status` shows the state, the decider, your rule counts and the counts for the session.
+
+A Hermes agent installs it the same way in spirit: one clone into the profile's plugin folder, and a config in that profile's own folder. [Hermes agents](#hermes-agents) has the commands and the differences.
 
 ## Security
 
@@ -769,6 +773,7 @@ Optional, in `~/.pi/agent/extensions/pi-automode-classifier/config.json`. A conf
 | `llm` | session model | The [chat decider](#chat-decider-keys) |
 | `classifier` | Kev on port 11438 | The [decision model](#sample-configs) and its questions |
 | `command` | none | The [classifier process](#stage-2-lancet): `argv`, `timeoutMs` (5000), `askAbove` (0.2) and `allowBelow` (0.1) |
+| `providers` | `{}` | [Hermes](#hermes-agents) only: endpoints by the name `classifier.provider` or `llm.provider` gives, each a `baseUrl` and the name of the variable with its key. Pi resolves its own models and ignores this |
 
 The decision log holds full commands, so treat it like shell history.
 
@@ -806,6 +811,76 @@ Here is a config that allows pushes to `origin`, lets the decider judge deploys,
 - `classifier.llm` is now `llm`. `enabled` is gone, since `decider` picks the decider. `reasoning: false` is `thinkingLevel: "off"`, `failClosed: false` is `onNoAnswer: "ask"`, and the four rule lists moved into `llm.prompt`.
 - `withoutUi: "allow"` is now `"withoutUi": { "onAsk": "allow" }`.
 - With no config file, 0.2 used the local Kev server and 0.3 uses the chat decider. Add `"decider": ["classifier"]` to keep Kev.
+
+## Hermes agents
+
+The same guard runs as a plugin for [Hermes](https://github.com/NousResearch/hermes-agent) agents: the same rules, the same config keys, the same three stages. One repo holds both. [`core/`](core/) has the decisions, [`index.ts`](index.ts) the Pi wrapper, [`hermes/`](hermes/) the Hermes side. Nothing in `core/`, `rules.ts` or `automode.ts` imports Pi, and the test suite covers both hosts.
+
+Hermes runs Python and the guard is TypeScript, so `hermes/plugin.py` registers the `pre_tool_call`, `pre_llm_call` and `post_tool_call` hooks, and starts [`hermes/hook.ts`](hermes/hook.ts) with a Node that runs TypeScript, one process per call: a JSON request in, one answer out. The answer is allow, block, or escalate to Hermes' own approval gate. It fails closed. No Node, a late guard, junk from the guard, or an answer the wrapper does not know all go to the approval gate, and Hermes denies an approval nobody answers.
+
+### Install
+
+Clone the repo into the profile's plugin folder and enable it. A profile's home is `~/.hermes`, or `~/.hermes/profiles/<name>` for a named profile:
+
+```bash
+git clone https://github.com/deepu105/pi-automode-classifier ~/.hermes/plugins/automode-classifier
+hermes plugins doctor ~/.hermes/plugins/automode-classifier   # discovery, the manifest and register(ctx), in a throwaway home
+hermes plugins list                         # enable it if it shows disabled
+```
+
+Each profile keeps its own config in `<profile home>/automode-classifier/config.json`, and its decision log beside it. Only the keys you change are needed. The one almost every profile needs is the hook timeout, because Hermes abandons a `pre_tool_call` callback at `plugins.hook_callback_timeout` (30 s by default) and blocks the tool:
+
+```yaml
+# <profile home>/config.yaml
+plugins:
+  hook_callback_timeout: 160   # seconds, 600 at most
+```
+
+The wrapper waits for both chat passes plus the scorer plus 15 seconds of slack: `llm.timeoutMs` times two when `twoStage` is on, plus `classifier.timeoutMs`, plus `command.timeoutMs`, plus the slack. The defaults come to 145 s, which is why the value above has to be above it, and why you may prefer lower `timeoutMs` values over a long timeout. A call Hermes timed out is blocked with a timeout message, which is never what the guard decided. That timeout covers every plugin hook, so keep your other hooks quick.
+
+A profile that scores with LANCET and judges with a chat model on another machine:
+
+```json
+{
+  "decider": ["classifier", "llm"],
+  "classifier": { "provider": "z13", "model": "lancet" },
+  "llm": { "provider": "z13", "model": "flash-next-128k", "contextWindow": 131072, "thinkingLevel": "off" },
+  "providers": { "z13": { "baseUrl": "http://z13.local:11435/v1", "apiKeyEnv": "LLAMASTASH_KEY" } }
+}
+```
+
+`providers` is the Hermes key: a name, an OpenAI-compatible base URL, and the name of the variable that holds the key. The plugin reads the key through Hermes' own lookup (`agent.secret_scope.get_secret`), with the environment behind it, so a profile secret or an exported variable both work. Stage 2 posts to `<baseUrl>/systemone`, stage 3 to `<baseUrl>/chat/completions`, and both send the key as a bearer token. Set `llm.contextWindow` to what the endpoint really has: the chat decider's rule prompt is about 25,000 tokens, and a window smaller than that comes back as "too small to classify", which holds the call back.
+
+### What maps to what
+
+| In Pi | In Hermes |
+| --- | --- |
+| The `bash`, `write`, `edit`, `read`, `grep` tools | `terminal`, `process_manage` and `execute_code` as commands; `write_file` and `patch` as file changes; `read_file` and `search_files` as reads |
+| The confirm prompt | Hermes' approval gate. Its own timeout and approval rules decide what a repeat call costs |
+| Nobody to ask: print mode, most subagents | cron runs, kanban workers and programmatic platforms (`webhook`, `api_server`). `withoutUi.onAsk` decides there |
+| Pi's `settings.json` and this extension's files | the profile's `config.yaml`, `.env`, `SOUL.md`, `shell-hooks-allowlist.json`, the plugin folder and its config folder. Always ask, no rule opens them |
+| Pi's own files: `~/.pi/agent`, any `.pi` folder, `AGENTS.md` | the profile's `plugins/` folder, which asks like Pi's own files. `SOUL.md` and `config.yaml` are stricter, like `settings.json` |
+| `~/.pi/agent/extensions/pi-automode-classifier/config.json` | `<profile home>/automode-classifier/config.json` |
+| `~/.local/state/pi-automode-classifier/decisions.jsonl` | `<profile home>/automode-classifier/decisions.jsonl` |
+| `/automode-classifier status`, `on`, `off` | the same command, the same rows, minus the session counts: each call is a fresh process |
+| Stage 3 on the session's own model | an endpoint you name: `llm.provider` plus `providers`. Hermes hands a plugin no handle on the session's model |
+| Stage 2 through Pi's model registry | `classifier.provider` plus `providers`, or the local endpoint with `classifier.endpoint` and `startCommand`, which work the same in both |
+
+Everything else under [Configuration](#configuration) reads the same here: your own rule patterns, `allowedPaths`, `guardedPaths`, `withoutUi.rules`, the classifier questions and `classifier.contextChars`, `command.argv` for a classifier that runs as a process, the `llm.prompt` rule lists, `onBlock`, `onNoAnswer` and the denial caps. [Stage 1: rules](#stage-1-rules), [What asks you](#what-asks-you), [Scripts and programs](#scripts-and-programs) and [Credential files](#credential-files) all apply: they are the same code, and `Hermes` is the product name in their reasons.
+
+### What is not there in Hermes
+
+- **The prompt's wider choices.** `Allow "git push *" for this session`, `Always allow changes in <folder>` and `Always allow …` are answered inside Pi's prompt and can be saved to your config. The gate in Hermes answers one call and remembers its own rules by a key this plugin gives it, and a `pre_tool_call` hook never learns what the person answered, so nothing wider is offered. Put those patterns in the profile's `rules.allow` and `allowedPaths` instead.
+- **`promptTimeoutMs`.** Hermes' approval gate has its own timeout; this one is not read.
+- **`llm.warmCache`.** It warms the Pi session's prefix cache at session start. Hermes has no session-start hook here to do it from, so the first decision pays the cold prefill.
+- **The session counts**, in `status`, and a decision log entry for what the person answered. An ask is logged as `"outcome": "ask"` with the rule and the reason that asked; allow and block are logged as in Pi.
+- **The benches.** They drive Pi's handler.
+
+The transcript the chat decider reads is the messages Hermes gives a hook at the turn's start, plus the calls that finished in that turn. Tool output and the agent's own prose stay out of it, as in Pi, so a file the agent read cannot put instructions in front of the decider.
+
+### What it costs
+
+Stage 1 on its own costs about 85 ms per call on my machine, most of it Node starting, and stage 2 and 3 cost what they cost in Pi plus that start. `/automode-classifier status` adds a health probe of the classifier endpoint, half a second at most. `hermes plugins doctor`, `node test-hermes.mjs` and `python3 test_hermes.py` all run without a model or a server.
 
 ## How well does it do?
 
@@ -896,11 +971,11 @@ Any setup:
 
 ## Development
 
-`node test.mjs` runs the rule, config and handler tests and needs no server. It needs `git`, and it makes a scratch repository under `$HOME` and removes it again. The benches run the suites in `bench/suites` through the plugin's own `tool_call` handler, as Pi calls it, with the rules, classifier and chat model from `bench/config.json` (same shape as the plugin's config), or the plugin's defaults without it. `npm run bench` stops after the classifier, `npm run bench:llm` sends the `user-requests` and `bench-llm-cases` suites to the chat model only, and `npm run bench:flow` runs all three stages on every suite. They take `--suites a,b`, `--ask-above`, `--allow-below` and `--limit`, print safe and risky commands run and stopped per suite, and write per-row results to `bench/results`. They need `pi` installed, and a chat model in `bench/config.json` for `bench:llm` and `bench:flow`. Tests and benches need Node 22.18 or newer, and none executes the commands under test.
+`npm test` runs three suites and needs no server, model or Hermes install: `node test.mjs` the rules, config and Pi handler, `node test-hermes.mjs` the Hermes wrapper's TypeScript (tool map, session text, endpoints, the JSON answers of `hermes/hook.ts`), and `python3 test_hermes.py` its Python half against a fake Hermes ctx. It needs `git`, and it makes a scratch repository under `$HOME` and removes it again. The benches run the suites in `bench/suites` through the plugin's own `tool_call` handler, as Pi calls it, with the rules, classifier and chat model from `bench/config.json` (same shape as the plugin's config), or the plugin's defaults without it. `npm run bench` stops after the classifier, `npm run bench:llm` sends the `user-requests` and `bench-llm-cases` suites to the chat model only, and `npm run bench:flow` runs all three stages on every suite. They take `--suites a,b`, `--ask-above`, `--allow-below` and `--limit`, print safe and risky commands run and stopped per suite, and write per-row results to `bench/results`. They need `pi` installed, and a chat model in `bench/config.json` for `bench:llm` and `bench:flow`. Tests and benches need Node 22.18 or newer, and none executes the commands under test.
 
 ### CI and releasing
 
-`.github/workflows/ci.yml` runs `node test.mjs` on Node 22 and 24 for every push to `main` and every pull request. `.github/workflows/release.yml` runs on a `v*` tag: it checks the tag against `version` in `package.json`, runs the tests, publishes to npm with [trusted publishing](https://docs.npmjs.com/trusted-publishers/) so no token is stored in the repo, and then opens a GitHub release for the tag. To release: bump `version`, write the notes to `release-notes/v<version>.md` (the workflow uses that file when it is there, and generated notes when it is not), commit, then `git tag v<version> && git push origin v<version>`. On npmjs.com the package's trusted publisher is user `deepu105`, repository `pi-automode-classifier`, workflow filename `release.yml`, no environment, with `Allow npm publish` ticked: an entry created after 2026-09-03 only allows `npm stage publish` until you tick it, npm checks none of it until a publish runs, and the entry expires 2 days after you create it if nothing publishes through it. The same setup works from the command line, and needs npm 11.15 or newer, an account with two-factor authentication on, and a login that is not a granular token with 2FA bypass:
+`.github/workflows/ci.yml` runs `npm test` on Node 22 and 24 for every push to `main` and every pull request. `.github/workflows/release.yml` runs on a `v*` tag: it checks the tag against `version` in `package.json`, runs the tests, publishes to npm with [trusted publishing](https://docs.npmjs.com/trusted-publishers/) so no token is stored in the repo, and then opens a GitHub release for the tag. To release: bump `version`, write the notes to `release-notes/v<version>.md` (the workflow uses that file when it is there, and generated notes when it is not), commit, then `git tag v<version> && git push origin v<version>`. On npmjs.com the package's trusted publisher is user `deepu105`, repository `pi-automode-classifier`, workflow filename `release.yml`, no environment, with `Allow npm publish` ticked: an entry created after 2026-09-03 only allows `npm stage publish` until you tick it, npm checks none of it until a publish runs, and the entry expires 2 days after you create it if nothing publishes through it. The same setup works from the command line, and needs npm 11.15 or newer, an account with two-factor authentication on, and a login that is not a granular token with 2FA bypass:
 
 ```sh
 npm login

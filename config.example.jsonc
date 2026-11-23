@@ -153,6 +153,6 @@
   // Endpoints for a host with no model registry (Hermes), by the name that `classifier.provider` or
   // `llm.provider` gives. Each is {"baseUrl": "http://host:11435/v1", "apiKeyEnv": "NAME"}, where
   // NAME is the variable that holds the key. Pi resolves its models on its own and ignores this.
-  // The Hermes README has a worked example.
+  // The README's Hermes section has a worked example.
   "providers": {}
 }

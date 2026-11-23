@@ -1,7 +1,7 @@
 {
   "name": "pi-automode-classifier",
-  "version": "0.4.1",
-  "description": "Auto mode for Pi: deterministic rules first, then a local decision model, then a confirm prompt",
+  "version": "0.5.0",
+  "description": "Auto mode for Pi and Hermes agents: deterministic rules first, then a decision model, then a chat decider or a confirm prompt",
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -9,6 +9,7 @@
     "guardrails",
     "permissions",
     "decision-model",
+    "hermes",
     "llama.cpp"
   ],
   "license": "MIT",
