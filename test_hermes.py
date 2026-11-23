@@ -14,6 +14,7 @@ import json
 import os
 import shutil
 import sys
+import types
 import unittest
 from pathlib import Path
 
@@ -222,6 +223,25 @@ class Wrapper(unittest.TestCase):
         with patch_env({"AMC_TEST_KEY": " abc "}):
             raw = self.nh.raw_config(self.config)
             self.assertEqual(self.nh.resolve_providers(raw), {"pc": {"baseUrl": "http://x/v1", "apiKey": "abc"}})
+
+    def test_a_secret_the_environment_lacks_comes_from_hermes(self):
+        """A profile keeps its keys in the Hermes vault, which a plugin reads through agent.secret_scope."""
+        scope = types.ModuleType("agent.secret_scope")
+        scope.get_secret = lambda name: "from-vault" if name == "AMC_TEST_KEY" else None
+        agent = types.ModuleType("agent")
+        agent.secret_scope = scope
+        saved = {k: sys.modules.get(k) for k in ("agent", "agent.secret_scope")}
+        sys.modules["agent"], sys.modules["agent.secret_scope"] = agent, scope
+        try:
+            self.assertEqual(self.nh._secret("AMC_TEST_KEY"), "from-vault")
+            with patch_env({"AMC_TEST_KEY": "from-env"}):
+                self.assertEqual(self.nh._secret("AMC_TEST_KEY"), "from-env")
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    del sys.modules[k]
+                else:
+                    sys.modules[k] = v
 
     def test_a_config_that_is_not_readable_is_no_error_for_python(self):
         self.config.write_text("{ not json")
