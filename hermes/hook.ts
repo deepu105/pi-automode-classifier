@@ -14,8 +14,10 @@ import { subject } from "./tools.ts";
 
 const write = (answer: HookAnswer) => process.stdout.write(JSON.stringify(answer) + "\n");
 
-// The approval gate remembers one answer per key, so keep it short and stable for one exact call.
-const ruleKey = (d: Extract<Decision, { action: "ask" }>) => `automode:${d.tool}:${createHash("sha256").update(`${d.tool}\0${d.subject}`).digest("hex").slice(0, 12)}`;
+// The approval gate remembers one answer per key, and its [a]lways choice is permanent, so the key
+// is the core's own: the call, the directory it runs in, and whether it is one a hasty approval
+// must never cover (a script a download has since replaced).
+const ruleKey = (d: Extract<Decision, { action: "ask" }>) => `automode:${d.tool}:${createHash("sha256").update(d.key).digest("hex").slice(0, 12)}`;
 
 function decisionAnswer(d: Decision): HookAnswer {
   if (d.action === "block") return { action: "block", message: d.reason };

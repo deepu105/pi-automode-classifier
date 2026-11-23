@@ -289,6 +289,11 @@ ok("a later call that runs it asks, and says where it came from", runsDownload.a
 check("... and it is blocked where nobody can answer", decide("terminal", { command: "./downloaded.sh" }, { ...same, hasUI: false }).action, "block");
 const stranger = decide("terminal", { command: "./downloaded.sh" }, { ...same, session: "other-session" });
 ok("a session that did not download it sees only an unknown command", String(stranger.message).includes("unknown command"), JSON.stringify(stranger));
+// The approval gate keeps one answer per rule_key, so a call that turned dangerous must not share
+// the key it had while it was harmless: an approval given before would approve it again, and with
+// Hermes' [a]lways choice, in every later session.
+ok("the same call in the same session always asks under one key", decide("terminal", { command: "./downloaded.sh" }, same).rule_key === runsDownload.rule_key, `${runsDownload.rule_key}`);
+ok("a call that became critical asks under a different key", runsDownload.rule_key !== stranger.rule_key, `${runsDownload.rule_key} == ${stranger.rule_key}`);
 
 const authored = path.join(workspace, "authored.sh");
 writeConfig(llmConfig());
