@@ -5,14 +5,16 @@ import fs from "node:fs";
 import { health } from "../core/classifier.ts";
 import type { Config } from "../core/config.ts";
 import type { Guard } from "../core/guard.ts";
-import { transcriptItems, type ChatRegistry, type Registry } from "../core/llm.ts";
+import type { TranscriptItem } from "../automode.ts";
+import { decideWithLlm, transcriptItems, type ChatRegistry, type Registry } from "../core/llm.ts";
 import { chatEndpoint, type ChatEndpoint } from "../core/openai.ts";
 import { noUiText, promptClause, scoreBands, sessionRow, someRules, statusRow } from "../core/status.ts";
 
 // What one call carries from Hermes to this file. hermes/plugin.py builds it.
 export interface HookRequest {
-  // "decide" (default) asks for one call; "status" asks for the status text.
-  mode?: "decide" | "status";
+  // "decide" (default) asks for one call; "status" asks for the status text; "warm" asks for one
+  // throwaway chat call that fills the decider's prefix cache. It decides nothing.
+  mode?: "decide" | "status" | "warm";
   // The config file to read, and the file to name in a config error.
   config: string;
   example?: string;
@@ -138,6 +140,16 @@ export async function statusText(config: Config, guard: Guard, request: HookRequ
   ].join("\n");
 }
 
+// One throwaway chat call, so the decider's fixed rule prompt sits in the endpoint's prefix cache
+// before the first call that needs an answer. The answer is dropped; nothing here waits on it.
+export async function warmCache(config: Config, providers: Record<string, ChatEndpoint>): Promise<void> {
+  const warm: TranscriptItem[] = [{ kind: "user", text: "warming the rule prompt" }, { kind: "action", tool: "terminal", input: { command: "true" } }];
+  try {
+    await decideWithLlm(config, warm, undefined, chatFor(config, providers));
+  } catch {
+    // A warm call that fails costs nothing: the first real decision warms the cache itself.
+  }
+}
 // The session text the deciders get: what Hermes passed, with the call under review last.
 export function transcriptFor(history: unknown[], config: Config) {
   const entries = historyEntries(history);

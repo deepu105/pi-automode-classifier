@@ -10,13 +10,16 @@ Usage: python3 test_hermes.py
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent
 # Not under a temp directory: the rules treat those as scratch space.
@@ -69,6 +72,7 @@ class Wrapper(unittest.TestCase):
 
     def setUp(self):
         shutil.rmtree(FIXTURE, ignore_errors=True)
+        self.nh.SESSIONS._by_session.clear()  # one store is shared by the whole run: no test sees another's session
         (FIXTURE / "automode-classifier").mkdir(parents=True)
         (FIXTURE / "workspace").mkdir()
         self.workspace = FIXTURE / "workspace"
@@ -89,7 +93,7 @@ class Wrapper(unittest.TestCase):
 
     # register()
     def test_registers_the_hooks_and_the_command(self):
-        self.assertEqual(sorted(self.ctx.hooks), ["post_tool_call", "pre_llm_call", "pre_tool_call"])
+        self.assertEqual(sorted(self.ctx.hooks), ["on_session_start", "post_tool_call", "pre_llm_call", "pre_tool_call"])
         self.assertEqual(list(self.ctx.commands), ["automode-classifier"])
 
     # what the guard answers
@@ -316,6 +320,71 @@ class Wrapper(unittest.TestCase):
         self.assertTrue(os.access(node, os.X_OK))
         self.assertTrue(self.nh._new_enough(node))
         self.assertEqual(self.nh.node_binary(), node, "the node found should be kept, not looked up again")
+
+    # warming the chat decider's prefix cache
+    def test_warming_fires_once_per_session(self):
+        self.write_config({"decider": ["llm"], "llm": {"warmCache": True, "provider": "pc", "model": "m"}})
+        warmed = []
+        with mock.patch.object(self.nh, "spawn_warm", lambda request: warmed.append(request["session"])):
+            for _ in range(3):
+                self.plugin._warm_cache(session_id="w1")
+            self.plugin._warm_cache(session_id="w2")
+        self.assertEqual(warmed, ["w1", "w2"])
+        self.assertTrue((FIXTURE / "automode-classifier" / "sessions" / "w1.warm").is_file())
+
+    def test_a_turn_warms_once_too(self):
+        """Hermes may fire only the turn hook: it warms, and only the first turn claims it."""
+        self.write_config({"decider": ["llm"], "llm": {"warmCache": True, "provider": "pc", "model": "m"}})
+        warmed = []
+        with mock.patch.object(self.nh, "spawn_warm", lambda request: warmed.append(request["session"])):
+            self.ctx.turn(session_id="w3")
+            self.ctx.turn(session_id="w3")
+        self.assertEqual(warmed, ["w3"])
+
+    def test_warming_waits_for_nothing(self):
+        """The turn must not wait for the warm call: the wrapper starts a process and leaves it."""
+        started = []
+
+        class NoWait:
+            """A child that fails the test if anything waits for it or reads from it."""
+
+            def __init__(self, *args, **kwargs):
+                started.append(kwargs.get("stdout"))
+                self.stdin = io.StringIO()
+
+            def wait(self, *a, **k):
+                raise AssertionError("spawn_warm must not wait for the process it started")
+
+            def communicate(self, *a, **k):
+                raise AssertionError("spawn_warm must not read from the process it started")
+
+        # node_binary is stood in for: it starts a process of its own to check the version, and
+        # the fake Popen below would answer it.
+        with mock.patch.object(self.nh, "node_binary", lambda: "/bin/true"), mock.patch.object(self.nh.subprocess, "Popen", NoWait):
+            self.nh.spawn_warm({"mode": "warm"})
+        self.assertEqual(started, [subprocess.DEVNULL], "the child's output goes to nothing, not to a pipe we hold")
+
+    def test_warming_only_when_the_config_asks_for_it(self):
+        warmed = []
+        spawn = lambda request: warmed.append(request["session"])  # noqa: E731
+        cases = [
+            ("the decider has no chat model", {"decider": ["classifier"], "llm": {"warmCache": True}}),
+            ("warming is off", {"decider": ["llm"], "llm": {}}),
+            ("auto mode is off", {"decider": ["llm"], "enabled": False, "llm": {"warmCache": True}}),
+        ]
+        for i, (_, config) in enumerate(cases):
+            self.write_config(config)
+            with mock.patch.object(self.nh, "spawn_warm", spawn):
+                self.plugin._warm_cache(session_id=f"off-{i}")
+        self.assertEqual(warmed, [])
+
+    def test_a_session_turned_off_does_not_warm(self):
+        self.write_config({"decider": ["llm"], "llm": {"warmCache": True}})
+        self.ctx.status("off")
+        warmed = []
+        with mock.patch.object(self.nh, "spawn_warm", lambda request: warmed.append(request["session"])):
+            self.plugin._warm_cache(session_id="s1")
+        self.assertEqual(warmed, [])
 
 
 class patch_env:

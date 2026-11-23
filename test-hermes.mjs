@@ -217,9 +217,11 @@ const stateOf = (id) => JSON.parse(fs.readFileSync(path.join(sessions, `${id}.js
 
 // A chat endpoint the guard can reach, so the chat decider really answers.
 let chatAnswer = "<block>no</block>";
+const chatRequests = [];
 const chatServer = http.createServer((req, res) => {
   req.on("data", () => undefined);
   req.on("end", () => {
+    chatRequests.push(req.url);
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify({ choices: [{ message: { content: chatAnswer }, finish_reason: "stop" }] }));
   });
@@ -269,6 +271,13 @@ fs.utimesSync(stale, longAgo, longAgo);
 decide("terminal", { command: "ls" }, same);
 ok("a session idle for over a week is deleted", !fs.existsSync(stale));
 check("two parallel calls of one session add up instead of overwriting", mergeState({ files: { b: "fetched" }, counts: { rule: 1, model: 1, asked: 0, blocked: 0 }, denials: { consecutive: 1, total: 1 } }, { files: {}, counts: { rule: 1, model: 0, asked: 0, blocked: 0 }, denials: { consecutive: 0, total: 0 } }, { files: { a: "authored" }, counts: { rule: 2, model: 0, asked: 0, blocked: 0 }, denials: { consecutive: 1, total: 1 } }), { files: { b: "fetched", a: "authored" }, counts: { rule: 2, model: 1, asked: 0, blocked: 0 }, denials: { consecutive: 2, total: 2 } });
+// The warming call: one throwaway chat request, and an answer that decides nothing.
+writeConfig(llmConfig());
+const chatBefore = chatRequests.length;
+const warm = await askAsync({ ...request("terminal", { command: "ls" }, { session: "warmer", sessions, providers: chatProvider }), mode: "warm" });
+check("the warming call answers, and its answer decides nothing", warm.action, "allow");
+check("it sends exactly one chat request", chatRequests.length - chatBefore, 1);
+check("and it leaves no state behind", fs.existsSync(path.join(sessions, "warmer.json")), false);
 await new Promise((done) => chatServer.close(done));
 
 // The status command

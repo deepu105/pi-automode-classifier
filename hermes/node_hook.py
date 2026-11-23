@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from collections import OrderedDict
@@ -124,6 +125,49 @@ def run_guard(request: dict, timeout_s: float) -> dict:
     if not isinstance(answer, dict) or answer.get("action") not in ("allow", "approve", "block", "status"):
         raise RuntimeError(f"the guard answered {line[:200]}")
     return answer
+
+
+def safe_session_name(session_id: str) -> str:
+    """A session id as one file-name stem. Node's ``sessionFile`` (core/session.ts) does the same."""
+    return re.sub(r"[^A-Za-z0-9._-]", "-", session_id or "")[:80] or "session"
+
+
+def claim_warm(sessions_dir: Path, session_id: str) -> bool:
+    """True once per session: the hook that gets here first makes the warming call, the rest skip it.
+
+    The marker sits beside the session's state file and is created in one atomic step, so two calls
+    that start together cannot both warm. A session that cannot be marked does not warm: a missing
+    cache costs time, not safety.
+    """
+    marker = Path(sessions_dir) / f"{safe_session_name(session_id)}.warm"
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        os.close(os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        return True
+    except OSError:
+        return False
+
+
+def spawn_warm(request: dict) -> None:
+    """Start the warming call and walk away: it must never hold up the turn that warms for it.
+
+    No wait and no pipe kept open: the guard reads its request and answers into nothing, and Hermes'
+    hook returns as soon as the process is started.
+    """
+    argv = [node_binary(), "--disable-warning=ExperimentalWarning", str(guard_path())]
+    proc = subprocess.Popen(
+        argv,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        start_new_session=True,  # outlives this hook, and a turn that is interrupted
+    )
+    try:
+        proc.stdin.write(json.dumps(request))
+        proc.stdin.close()
+    except OSError:
+        pass
 
 
 class Sessions:

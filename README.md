@@ -677,7 +677,7 @@ Pi's model API has no stop sequences, so the filter pass gets 128 tokens instead
 
 ### Chat decider keys
 
-These go in the `llm` block. Every key is optional; what you leave out keeps its default. In Hermes, `provider` names a `providers` endpoint and `warmCache` is not read; every other key works the same.
+These go in the `llm` block. Every key is optional; what you leave out keeps its default. In Hermes, `provider` names a `providers` endpoint; every other key works the same.
 
 | Key | Default | What it does |
 | --- | --- | --- |
@@ -686,7 +686,7 @@ These go in the `llm` block. Every key is optional; what you leave out keeps its
 | `contextWindow` | `0` | Override the catalog window; the transcript is fitted to it. `0`: catalog value |
 | `maxTokens` | `2048` | Reply budget of the reasoning pass |
 | `thinkingLevel` | `"low"` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`. With `off` neither pass thinks and no level is sent. The filter pass never sends one |
-| `warmCache` | `false` | One throwaway call at session start, so the rule prompt is cached before the first real question. Worth it on a local model, where a cold prefill takes tens of seconds; on a model you pay per token it costs one call per session |
+| `warmCache` | `false` | One throwaway call at session start, so the rule prompt is cached before the first real question. Worth it on a local model, where a cold prefill takes tens of seconds; on a model you pay per token it costs one call per session. In Hermes the call comes from the first hook of a session and runs in its own process |
 | `twoStage` | `true` | Fast filter first, reasoning only on what it flags |
 | `stage1MaxTokens` | `128` | Reply budget of the filter pass |
 | `timeoutMs` | `60000` | Timeout per pass, so a call that needs both passes can take twice this |
@@ -826,6 +826,8 @@ The same guard runs as a plugin for [Hermes](https://github.com/NousResearch/her
 
 Hermes runs Python and the guard is TypeScript, so `hermes/plugin.py` registers the `pre_tool_call`, `pre_llm_call` and `post_tool_call` hooks, and starts [`hermes/hook.ts`](hermes/hook.ts) with a Node that runs TypeScript, one process per call: a JSON request in, one answer out. The answer is allow, block, or escalate to Hermes' own approval gate. It fails closed. No Node, a late guard, junk from the guard, or an answer the wrapper does not know all go to the approval gate, and Hermes denies an approval nobody answers.
 
+`llm.warmCache` works here too. The first hook of a session (`on_session_start`, or the first turn's `pre_llm_call` if that is what Hermes fires) starts one throwaway chat call in its own process and walks away, so the turn never waits for it. A marker file (`sessions/<session id>.warm`) makes it one call per session.
+
 Because each call is its own process, one session's state lives in a file: `<profile home>/automode-classifier/sessions/<session id>.json`. It holds what the session wrote and downloaded, the counts `status` prints, and the denial counts, and it is the same state Pi keeps in memory (`GuardState` in [`core/guard.ts`](core/guard.ts)). Two calls of one session can run at once, so a save merges the change each call made under a lock file. A session nobody used for 7 days is deleted.
 
 ### Install
@@ -885,7 +887,6 @@ Everything else under [Configuration](#configuration) reads the same here: your 
 
 - **The prompt's wider choices.** `Allow "git push *" for this session`, `Always allow changes in <folder>` and `Always allow …` are answered inside Pi's prompt and can be saved to your config. The gate in Hermes answers one call and remembers its own rules by a key this plugin gives it, and a `pre_tool_call` hook never learns what the person answered, so nothing wider is offered. Put those patterns in the profile's `rules.allow` and `allowedPaths` instead.
 - **`promptTimeoutMs`.** Hermes' approval gate has its own timeout; this one is not read.
-- **`llm.warmCache`.** It warms the Pi session's prefix cache at session start. Hermes has no session-start hook here to do it from, so the first decision pays the cold prefill.
 - **A decision log entry for what the person answered.** A `pre_tool_call` hook never learns what the approval gate answered, so an ask is logged as `"outcome": "ask"` with the rule and the reason that asked; allow and block are logged as in Pi.
 - **The benches.** They drive Pi's handler.
 

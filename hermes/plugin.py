@@ -34,6 +34,7 @@ def register(ctx) -> None:
     ctx.register_hook("pre_tool_call", _guard_tool_call)
     ctx.register_hook("pre_llm_call", _start_turn)
     ctx.register_hook("post_tool_call", _end_call)
+    ctx.register_hook("on_session_start", _warm_cache)
     ctx.register_command(
         "automode-classifier",
         handler=_command,
@@ -168,6 +169,36 @@ def _text_of(message) -> str:
     return ""
 
 
+def _warming_useful(raw: dict, session_id: str) -> bool:
+    """The same check Pi makes at session start: a chat decider in use, turned on, and warming asked for."""
+    if raw.get("enabled") is False or "llm" not in (raw.get("decider") or []):
+        return False
+    if not (raw.get("llm") or {}).get("warmCache"):
+        return False
+    return SESSIONS.take(session_id).get("enabled") is not False
+
+
+def _warm_cache(session_id: str = "", **kwargs) -> None:
+    """One throwaway chat call per session, so the first decision does not pay a cold prefill.
+
+    Hermes has two hooks that can start it: ``on_session_start`` on the first turn of a new session,
+    and ``pre_llm_call`` on every turn. Whichever comes first claims the session's marker; the others
+    do nothing. The call runs in its own process and this one does not wait for it.
+    """
+    try:
+        home = _profile_home()
+        raw = node_hook.raw_config(home / "automode-classifier" / "config.json")
+        if not _warming_useful(raw, session_id):
+            return
+        if not node_hook.claim_warm(home / "automode-classifier" / "sessions", session_id):
+            return
+        request, _ = _request(session_id, mode="warm")
+        node_hook.spawn_warm(request)
+    except Exception as e:  # a warm call is a bonus: nothing here may disturb the turn
+        log.debug("automode-classifier: warming skipped (%s)", e)
+    return None
+
+
 def _start_turn(session_id: str = "", user_message="", conversation_history=None, platform: str = "", **kwargs) -> None:
     """Keep the session text from the turn's start. The return is not used: this only watches."""
     history = list(conversation_history or [])
@@ -178,6 +209,7 @@ def _start_turn(session_id: str = "", user_message="", conversation_history=None
     if text and not (last.get("role") == "user" and _text_of(last.get("content")) == text):
         history.append({"role": "user", "content": text})
     SESSIONS.start_turn(session_id, history, platform)
+    _warm_cache(session_id=session_id)
     return None
 
 

@@ -9,7 +9,7 @@ import { loadConfig } from "../core/config.ts";
 import { createGuard, emptyState, type Decision } from "../core/guard.ts";
 import { loadState, saveState, sessionFile } from "../core/session.ts";
 import { appendLog, clip } from "../core/util.ts";
-import { chatFor, providerRegistry, statusText, transcriptFor, type HookAnswer, type HookRequest } from "./host.ts";
+import { chatFor, providerRegistry, statusText, transcriptFor, warmCache, type HookAnswer, type HookRequest } from "./host.ts";
 import { subject } from "./tools.ts";
 
 const write = (answer: HookAnswer) => process.stdout.write(JSON.stringify(answer) + "\n");
@@ -45,6 +45,12 @@ async function run(request: HookRequest): Promise<HookAnswer> {
   guard.notice = error;
   if (typeof request.enabled === "boolean") guard.setEnabled(request.enabled);
   if (request.mode === "status") return { action: "status", text: await statusText(config, guard, request) };
+  // The warming call: one throwaway answer, so the first real decision finds a warm prefix cache.
+  // Nothing is decided and nothing is saved, so it is not a decision at all.
+  if (request.mode === "warm") {
+    await warmCache(config, providers);
+    return { action: "allow" };
+  }
   const decision = await guard.evaluate({
     tool: request.tool ?? "",
     input: (request.input ?? {}) as Record<string, unknown>,
