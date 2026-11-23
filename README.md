@@ -840,7 +840,20 @@ hermes plugins doctor ~/.hermes/plugins/automode-classifier   # discovery, the m
 hermes plugins list                         # enable it if it shows disabled
 ```
 
-Hermes' own installer, `hermes plugins install`, refuses this plugin: its scanner reads a guard's rule list as a list of dangerous commands, calls the plugin dangerous, and `--force` does not override that. Clone the folder instead, as above, and update it with `git pull` there. `hermes plugins validate` fails on that same scan and passes every other check, including the probe that runs `register(ctx)`; `hermes plugins doctor` passes.
+Hermes' own installer, `hermes plugins install`, refuses this plugin: its scanner reads a guard's rule list as a list of dangerous commands, calls the plugin dangerous, and `--force` does not override that. `hermes plugins validate` fails on that same scan and passes every other check, including the probe that runs `register(ctx)`; `hermes plugins doctor` passes.
+
+### Update
+
+The same scan blocks `hermes plugins update`, so Hermes cannot update this plugin by itself. Tested on Hermes 0.23.3 against a local bare origin one commit ahead: `hermes plugins adopt <name>` on a self-cloned folder works and records the origin and revision, `hermes plugins check-updates` then reports `update available`, and `hermes plugins update <name>` refuses it with `Blocked (community source + dangerous verdict, 105 findings). --force does not override a dangerous verdict`, leaving the folder where it was.
+
+So update it with git, from the same repository Pi installs from (`github.com/deepu105/pi-automode-classifier`):
+
+```bash
+git -C ~/.hermes/plugins/automode-classifier pull --ff-only      # and once per profile home
+systemctl --user restart hermes-gateway.service                 # new code loads in new sessions
+```
+
+Or run the installer a second time, which pulls the source, copies it into every profile home and restarts the gateway. Adopt the clone only if you want `check-updates` to tell you a newer revision exists; it cannot apply one.
 
 Each profile keeps its own config in `<profile home>/automode-classifier/config.json`, and its decision log beside it. Only the keys you change are needed. The one almost every profile needs is the hook timeout, because Hermes abandons a `pre_tool_call` callback at `plugins.hook_callback_timeout` (30 s by default) and blocks the tool:
 
