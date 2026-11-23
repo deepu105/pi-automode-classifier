@@ -3,3 +3,4 @@ node_modules/
 # machine config lives in ~/.pi/agent/extensions/pi-automode-classifier/
 config.json
 bench/results/
+__pycache__/

@@ -44,7 +44,8 @@ import type { TranscriptItem } from "./automode.ts";
 import { isStrings, loadConfig as loadCoreConfig } from "./core/config.ts";
 import { classifierProcessRunning, health, startServer, stopClassifierProcess } from "./core/classifier.ts";
 import { decideWithLlm, llmName, transcriptItems, type ChatRegistry } from "./core/llm.ts";
-import { appendLog, afterTimeout } from "./core/util.ts";
+import { appendLog } from "./core/util.ts";
+import { noUiText, promptClause, scoreBands, someRules, statusRow } from "./core/status.ts";
 import { createGuard, type GuardSubject, type GuardSession } from "./core/guard.ts";
 
 // The pipeline moved to core/ so a second host can use it. These names still come from this file,
@@ -180,13 +181,7 @@ export default function (pi: ExtensionAPI, overrides: Partial<ReturnType<typeof 
   const statusText = async (ctx: ExtensionContext) => {
     const { llm, classifier, command } = config;
     const status = guard.status();
-    const row = (label: string, text: string) => `${label.padEnd(15)}${text}`;
     const home = (text: string) => text.replaceAll(HOME, "~");
-    const some = (pairs: [number, string][]) => pairs.filter(([n]) => n).map(([n, what]) => `${n} ${what}`).join(", ");
-    const bands = (stage: "classifier" | "command", last: boolean) => {
-      const { allowBelow, askAbove } = config[stage];
-      return last || allowBelow >= askAbove ? `allow < ${askAbove}, ask >= ${askAbove}` : `allow < ${allowBelow}, next ${allowBelow}-${askAbove}, ask >= ${askAbove}`;
-    };
     const describe = async (stage: string, i: number) => {
       const label = `${i + 2}. ${stage === "llm" ? "LLM" : stage === "command" ? "Command" : "Classifier"}:`;
       const last = i === config.decider.length - 1;
@@ -194,27 +189,25 @@ export default function (pi: ExtensionAPI, overrides: Partial<ReturnType<typeof 
         const notes = [llm.twoStage ? "two-stage" : "one stage", `thinking:${llm.thinkingLevel}`];
         if (llm.onBlock === "ask") notes.push("asks instead of blocking");
         if (llm.onNoAnswer === "ask") notes.push("asks when it has no answer");
-        return row(label, `${llmName(llm, ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined)}, via Pi (${notes.join(", ")})`);
+        return statusRow(label, `${llmName(llm, ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined)}, via Pi (${notes.join(", ")})`);
       }
-      if (stage === "command") return row(label, `${home(command.argv.join(" "))}, ${classifierProcessRunning() ? "running" : "not running"} (${bands(stage, last)})`);
-      const extra = Object.keys(classifier.extraQuestions);
+      if (stage === "command") return statusRow(label, `${home(command.argv.join(" "))}, ${classifierProcessRunning() ? "running" : "not running"} (${scoreBands(config[stage], last)})`);
+      const more = Object.keys(classifier.extraQuestions);
       const where = classifier.provider ? `${classifier.provider}/${classifier.model}, via Pi` : `${classifier.endpoint}, ${(await health(config, 500)) ? "up" : "down"}`;
-      return row(label, `${where} (${bands(stage, last)}${extra.length ? `, extra: ${extra.join(", ")}` : ""})`);
+      return statusRow(label, `${where} (${scoreBands(config[stage], last)}${more.length ? `, extra: ${more.join(", ")}` : ""})`);
     };
     const { deny, ask, classify: classified, allow } = status.rules;
-    const headless = config.withoutUi.rules;
-    const noUi = `asks ${config.withoutUi.onAsk === "allow" ? "run" : "blocked"}${headless.deny.length || headless.allow.length ? ` + ${some([[headless.deny.length, "deny"], [headless.allow.length, "allow"]])} rules` : ""}`;
-    const yours = some([[deny, "deny"], [ask, "ask"], [classified, "classify"], [allow, "allow"], [status.allowedPaths.length, "allowed paths"]]) || "none";
+    const yours = someRules([[deny, "deny"], [ask, "ask"], [classified, "classify"], [allow, "allow"], [status.allowedPaths.length, "allowed paths"]]) || "none";
     const counts = status.counts;
     return [
       `Auto mode: ${status.enabled ? "on" : "OFF for this session   (turn on: /automode-classifier on)"}`,
       ...(configError ? [`Config error: ${home(configError)}`] : []),
-      row("1. Rules:", `${yours} (no UI: ${noUi}, prompts: ${config.promptTimeoutMs ? `block after ${afterTimeout(config.promptTimeoutMs)}` : "wait forever"})`),
-      ...(config.decider.length ? await Promise.all(config.decider.map(describe)) : [row("2. Decider:", "none, classify verdicts ask you")]),
+      statusRow("1. Rules:", `${yours} (no UI: ${noUiText(config)}, ${promptClause(config)})`),
+      ...(config.decider.length ? await Promise.all(config.decider.map(describe)) : [statusRow("2. Decider:", "none, classify verdicts ask you")]),
       "",
-      row("Session:", `${counts.rule} allowed by rule, ${counts.model} by model, ${counts.asked} asked, ${counts.blocked} blocked${status.denials.total ? `, ${status.denials.total} LLM denials (${status.denials.consecutive} in a row)` : ""}`),
-      row("Config:", `${home(CONFIG_FILE)}${fs.existsSync(CONFIG_FILE) ? "" : " (not present, defaults in use)"}`),
-      row("Log:", config.log ? home(LOG_FILE) : "off"),
+      statusRow("Session:", `${counts.rule} allowed by rule, ${counts.model} by model, ${counts.asked} asked, ${counts.blocked} blocked${status.denials.total ? `, ${status.denials.total} LLM denials (${status.denials.consecutive} in a row)` : ""}`),
+      statusRow("Config:", `${home(CONFIG_FILE)}${fs.existsSync(CONFIG_FILE) ? "" : " (not present, defaults in use)"}`),
+      statusRow("Log:", config.log ? home(LOG_FILE) : "off"),
     ].join("\n");
   };
 

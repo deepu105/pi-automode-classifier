@@ -1,0 +1,10 @@
+name: automode-classifier
+version: 0.4.1
+description: Auto mode for Hermes. Rules first, then a decision model, then a chat decider, then the approval gate.
+author: Deepu K Sasidharan
+# The node guard needs a Node that runs TypeScript directly: 22.18 or newer. Hermes installs one
+# under <HERMES_HOME>/tools/node-*, and this plugin uses a `node` on PATH first if there is one.
+provides_hooks:
+  - pre_tool_call
+  - pre_llm_call
+  - post_tool_call

@@ -91,6 +91,10 @@ export interface Config {
   // goes to its stdin as a JSON line {"command", "shell", "cwd"} and it answers with a JSON line
   // that has a `score` from 0 to 1. A leading `~/` in argv is expanded.
   command: { argv: string[]; timeoutMs: number; askAbove: number; allowBelow: number };
+  // Endpoints for a host with no model registry (Hermes), by the name `classifier.provider` or
+  // `llm.provider` gives: its base URL and the name of the variable that holds its key. A host
+  // that resolves its own models (Pi) leaves this empty.
+  providers: Record<string, { baseUrl: string; apiKeyEnv: string }>;
 }
 
 export const DEFAULTS: Config = {
@@ -123,6 +127,7 @@ export const DEFAULTS: Config = {
   llm: DEFAULT_LLM,
   // Picked with LANCET Nano 0.4.3; the README has the numbers.
   command: { argv: [], timeoutMs: 5000, askAbove: 0.2, allowBelow: 0.1 },
+  providers: {},
 };
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -136,6 +141,8 @@ const oneOf = (...values: string[]) => (v: unknown) => values.includes(v as stri
 const isTimeout = (v: unknown) => typeof v === "number" && v > 0 && v <= 2_147_483_647;
 // A prompt timeout of 0 means no timeout.
 const isTimeoutOrOff = (v: unknown) => v === 0 || isTimeout(v);
+const isProviders = (v: unknown) =>
+  isObject(v) && Object.entries(v).every(([name, p]) => isString(name) && isObject(p) && Object.keys(p).every((k) => ["baseUrl", "apiKeyEnv"].includes(k)) && isString(p.baseUrl) && URL.canParse(p.baseUrl) && isString(p.apiKeyEnv));
 const isQuestion = (v: unknown) =>
   typeof v === "string" ||
   (isObject(v) &&
@@ -201,6 +208,7 @@ const SCHEMA: Schema = {
     prompt: { environment: isStrings, hardDeny: isStrings, softDeny: isStrings, allow: isStrings },
   },
   command: { argv: isStrings, timeoutMs: isTimeout, askAbove: isThreshold, allowBelow: isThreshold },
+  providers: isProviders,
 };
 
 // The first problem in `value`, naming its key. Own keys only, so "toString" is unknown.
