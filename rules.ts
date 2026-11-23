@@ -111,8 +111,10 @@ export interface Scope {
   root: string | undefined;
   // This guard's own files and Pi's settings. Changes to them always ask.
   guarded: string[];
-  // Pi's agent directory. See isPiFile.
+  // The host's own files: its agent directory, its config. See isPiFile.
   piDirs: string[];
+  // The host's name in a reason about its own files: "Pi", "Hermes".
+  product: string;
   // Extra directories where file changes are allowed, like the project root.
   allowed: string[];
   rules?: UserRules;
@@ -141,6 +143,7 @@ const withTargets = (paths: string[]) => [...new Set(paths.map(expandHome).flatM
 export interface ScopeOptions {
   allowedPaths?: string[];
   piDirs?: string[];
+  product?: string;
   rules?: UserRules;
   picked?: Matcher[];
   files?: SessionFiles;
@@ -155,6 +158,7 @@ export function makeScope(cwd: string, guarded: string[], options: ScopeOptions 
     root: within(HOME, real) ? undefined : real,
     guarded: withTargets(guarded),
     piDirs: withTargets(options.piDirs ?? []),
+    product: options.product ?? "Pi",
     allowed: withTargets(options.allowedPaths ?? []),
     rules: options.rules,
     picked: options.picked,
@@ -710,7 +714,7 @@ function writeTargets(cmd: string, args: string[], scope: Scope, literalInput = 
     for (const p of written) {
       if (p && DEV_SINKS.test(p)) continue;
       if (isGuarded(p, scope)) return guardAsk(`${cmd} changes the auto-mode guard's own files`);
-      if (isPiFile(p, scope)) return piAsk(`${cmd} changes Pi's own files: ${t}`);
+      if (isPiFile(p, scope)) return piAsk(`${cmd} changes ${scope.product}'s own files: ${t}`);
       if (!isLocal(p, scope)) return outside(`${cmd} writes outside the working directory: ${t}`, p);
     }
   }
@@ -739,7 +743,7 @@ function rm(args: string[], scope: Scope): Verdict {
       return deny(`rm -r of ${t} would wipe a home or system directory`);
     }
     if (isGuarded(p, scope)) verdict = worst(verdict, guardAsk("rm deletes the auto-mode guard's own files"));
-    else if (isPiFile(p, scope)) verdict = worst(verdict, piAsk(`rm deletes Pi's own files: ${t}`));
+    else if (isPiFile(p, scope)) verdict = worst(verdict, piAsk(`rm deletes ${scope.product}'s own files: ${t}`));
     else if (!isLocal(p, scope)) verdict = worst(verdict, outside(`rm deletes outside the working directory: ${t}`, p));
     else if (recursive && scope.root && (p === scope.root || (bare && path.dirname(p!) === scope.root) || /(^|\/)\.git(\/|$)/.test(p!))) {
       verdict = worst(verdict, ask(`rm -r of ${t} deletes the whole project or its git data`));
@@ -849,7 +853,7 @@ function network(cmd: string, args: string[], scope: Scope): Verdict {
   const writes = (file: string) => {
     const p = resolveWord(file, scope);
     if (file === "-" || (p && DEV_SINKS.test(p))) return { p: undefined };
-    if (isPiFile(p, scope)) return { p, outside: piAsk(`${cmd} writes Pi's own files: ${file}`) };
+    if (isPiFile(p, scope)) return { p, outside: piAsk(`${cmd} writes ${scope.product}'s own files: ${file}`) };
     return isLocal(p, scope) ? { p } : { p, outside: outside(`${cmd} writes outside the working directory: ${file}`, p) };
   };
   for (const file of values(DOWNLOAD_FILES[cmd].other)) {
@@ -868,7 +872,7 @@ function network(cmd: string, args: string[], scope: Scope): Verdict {
   if (!remoteName) return ALLOW;
   const named = values(DOWNLOAD_FILES[cmd].dir).at(-1);
   const dir = named === undefined ? scope.cwd : resolveWord(named, scope);
-  if (isPiFile(dir, scope)) return piAsk(`${cmd} writes into Pi's own files: ${named ?? dir}`);
+  if (isPiFile(dir, scope)) return piAsk(`${cmd} writes into ${scope.product}'s own files: ${named ?? dir}`);
   if (!isLocal(dir, scope)) return outside(`${cmd} writes outside the working directory${named ? `: ${named}` : ""}`, dir);
   for (const url of args.filter((a) => /^https?:\/\//.test(a))) {
     const file = path.basename(url.split(/[?#]/)[0]);
@@ -916,7 +920,7 @@ function find(args: string[], scope: Scope): Verdict {
   if (!acts) return ALLOW;
   for (const r of roots.length ? roots : ["."]) {
     const p = resolveWord(r, scope);
-    if (isPiFile(p, scope)) return piAsk(`find deletes or runs commands in Pi's own files: ${r}`);
+    if (isPiFile(p, scope)) return piAsk(`find deletes or runs commands in ${scope.product}'s own files: ${r}`);
     if (!isLocal(p, scope)) return outside(`find deletes or runs commands outside the working directory: ${r}`, p);
   }
   const exec = args.findIndex((a) => /^-(exec|execdir|ok|okdir)$/.test(a));
@@ -965,7 +969,7 @@ function redirects(cmd: Simple, scope: Scope): Verdict {
     if (p && DEV_SINKS.test(p)) continue;
     if (p && /^\/dev\//.test(p)) return deny(`writes to the device ${target}`);
     if (isGuarded(p, scope)) verdict = worst(verdict, guardAsk("redirect overwrites the auto-mode guard's own files"));
-    else if (isPiFile(p, scope)) verdict = worst(verdict, piAsk(`redirect writes Pi's own files: ${target}`));
+    else if (isPiFile(p, scope)) verdict = worst(verdict, piAsk(`redirect writes ${scope.product}'s own files: ${target}`));
     else if (!isLocal(p, scope)) verdict = worst(verdict, outside(`redirect writes outside the working directory: ${target}`, p));
     // Appending literal text leaves the file's origin as it was.
     if (!(origin === "authored" && cmd.append?.includes(target))) note(p, origin, scope);
@@ -1056,7 +1060,7 @@ function command(cmd: Simple, scope: Scope, depth: number): Verdict {
     if (of === undefined) return worst(verdict, classify("dd"));
     const p = resolveWord(of, scope);
     if (p && /^\/dev\//.test(p) && !DEV_SINKS.test(p)) return deny(`dd writes to the device ${of}`);
-    if (isPiFile(p, scope)) return worst(verdict, piAsk(`dd writes Pi's own files: ${of}`));
+    if (isPiFile(p, scope)) return worst(verdict, piAsk(`dd writes ${scope.product}'s own files: ${of}`));
     return worst(verdict, isLocal(p, scope) ? classify("dd") : outside(`dd writes outside the working directory: ${of}`, p));
   }
   if ((name === "chmod" || name === "chown" || name === "chgrp") && hasFlag(args, "R", "--recursive")) {
@@ -1207,7 +1211,7 @@ export function bashVerdict(command: string, scope: Scope): Verdict {
 export function fileVerdict(tool: string, target: string, scope: Scope): Verdict {
   const p = resolveWord(target.startsWith("@") ? target.slice(1) : target, scope);
   if (isGuarded(p, scope)) return guardAsk(`${tool} changes the auto-mode guard's own files`);
-  if (isPiFile(p, scope)) return piAsk(`${tool} changes Pi's own files: ${target}`);
+  if (isPiFile(p, scope)) return piAsk(`${tool} changes ${scope.product}'s own files: ${target}`);
   // The write tool replaces the whole file with the agent's text; an edit keeps the file's origin.
   // For the chat decider an edit makes a file of no known origin one the session wrote, so a
   // project script the agent changed goes to it when run.
