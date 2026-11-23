@@ -120,6 +120,15 @@ class Wrapper(unittest.TestCase):
         answer = self.ctx.guard("write_file", {"path": str(FIXTURE / "elsewhere.txt"), "content": "x"})
         self.assertEqual(answer["action"], "approve")
 
+    def test_a_workdir_of_its_own_does_not_move_the_session(self):
+        """`terminal` takes a `workdir` the model sets: it is a `cd` inside the command, not the
+        project, so a write beside it is still a write outside the session."""
+        elsewhere = FIXTURE / "elsewhere"
+        elsewhere.mkdir()
+        self.assertEqual(self.ctx.guard("terminal", {"command": "echo hi > evil.txt", "workdir": str(elsewhere)})["action"], "approve")
+        request, _ = self.plugin._request("s1", tool="terminal", args={"command": "ls", "workdir": str(elsewhere)})
+        self.assertEqual(request["cwd"], str(self.workspace))
+
     def test_a_write_to_the_guard_own_config_asks(self):
         answer = self.ctx.guard("write_file", {"path": str(self.config), "content": "x"})
         self.assertEqual(answer["action"], "approve")

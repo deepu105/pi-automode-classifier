@@ -105,9 +105,14 @@ def approval_possible(platform: str) -> bool:
     return _truthy(os.environ.get("HERMES_EXEC_ASK"))
 
 
-def _cwd(args: dict) -> str:
-    """Where the call runs: the call's own directory, then the session's, then this process's."""
-    for value in (args.get("workdir"), _CTX.session_cwd() if _CTX else "", _session_env("HERMES_SESSION_CWD"), os.getcwd()):
+def _cwd() -> str:
+    """The directory of the session, never the one a call names for itself.
+
+    ``terminal`` takes a ``workdir`` the model sets. Taken for the session directory it would make
+    that tree the project, and every write in it would look local; ``hermes/tools.ts`` judges it as
+    the ``cd`` it is instead, so the rules for a cd apply to it.
+    """
+    for value in (_CTX.session_cwd() if _CTX else "", _session_env("HERMES_SESSION_CWD"), os.getcwd()):
         if isinstance(value, str) and value and os.path.isdir(value):
             return value
     return os.getcwd()
@@ -137,7 +142,7 @@ def _request(session_id: str, mode: str = "decide", tool: str = "", args: dict |
         "sessions": str(home / "automode-classifier" / "sessions"),
         "tool": tool,
         "input": args or {},
-        "cwd": _cwd(args or {}),
+        "cwd": _cwd(),
         "toolCallId": tool_call_id,
     }
     if session.get("enabled") is not None:
