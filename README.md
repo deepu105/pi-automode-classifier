@@ -84,9 +84,11 @@ It sees only the command. So the rules' ask verdicts, and scripts the agent wrot
 - `command`: a classifier that runs as a process, like [LANCET](#stage-2-lancet) on CPU, or LANCET [as a server](#run-lancet-as-a-server) under LlamaStash.
 - `classifier`: a [decision model](#stage-2-decision-models-kev-laya-jev) that answers one yes/no question, "is this command risky?", with a probability: Kev or Laya on a local llama.cpp server, or Jev through Pi.
 
+In Hermes both come from an endpoint you name in `providers`, because Hermes gives a plugin no handle on the session's model: [Hermes agents](#hermes-agents).
+
 ### Stage 3: chat model
 
-A [chat model](#stage-3-the-chat-decider) through Pi, the session's own unless you set `llm.provider` and `llm.model`. It reads your messages and the session's tool calls, not just the command, and answers block or allow with a reason. The rules' ask verdicts go to it too, the same split Claude Code uses. These still ask you: root (`sudo`, `su`, `doas`, `pkexec`), reading a credential file, running downloaded code, your own `ask` rules, and changes to this extension's or Pi's own files.
+A [chat model](#stage-3-the-chat-decider) through Pi, the session's own unless you set `llm.provider` and `llm.model`. It reads your messages and the session's tool calls, not just the command, and answers block or allow with a reason. The rules' ask verdicts go to it too, the same split Claude Code uses. These still ask you: root (`sudo`, `su`, `doas`, `pkexec`), reading a credential file, running downloaded code, your own `ask` rules, and changes to this extension's or Pi's own files. In Hermes the chat decider always needs a named endpoint, since there is no session model to borrow.
 
 ### Picking the stages
 
@@ -150,7 +152,7 @@ Changes to Pi's own configuration, instructions and code ask you, also inside th
 - **Context files** in any directory: `AGENTS.md`, `AGENTS.override.md`, `AGENTS.MD`, `CLAUDE.md` and `CLAUDE.MD`.
 - **`pi install`, `pi remove`, `pi update` and `pi config`.**
 
-Reading them is fine. For the `write` and `edit` tools, `Allow for this session` covers that one file. For a command, an `allow` rule replaces the ask, for example `"pi install npm:pi-subagents"`. Without a UI these follow `withoutUi.onAsk`. Pi's `settings.json` and this extension's files are stricter: they always ask, no rule opens them, and they are blocked without a UI.
+Reading them is fine. For the `write` and `edit` tools, `Allow for this session` covers that one file. For a command, an `allow` rule replaces the ask, for example `"pi install npm:pi-subagents"`. Without a UI these follow `withoutUi.onAsk`. Pi's `settings.json` and this extension's files are stricter: they always ask, no rule opens them, and they are blocked without a UI. In Hermes the same rule covers the profile's `plugins/` folder, `SOUL.md` and `config.yaml`: [What maps to what](#what-maps-to-what).
 
 ## Using all three stages
 
@@ -291,6 +293,8 @@ A classifier sees the command alone, which is what every `askAbove` in this READ
 | `classifier.contextIn: "state"` | The session goes beside the command as its own `context` key. Use this for Jev, and for llama.cpp's `/v1/systemone`, which passes the whole state through. |
 | `classifier.contextIn: "command"` | The session is folded into the command itself. Use this for [LANCET's server](#run-lancet-as-a-server), which reads only the command field. |
 
+In Hermes the session part is what the `pre_llm_call` hook gets at the turn's start, plus the tool calls that finished in that turn. Tool output and the agent's prose stay out.
+
 Two things to check before you trust it.
 
 - The model's window has to hold the extra text. The Kev preset above runs with `--ctx-size 1024`, so a 1200-character session does not fit. Raise the server's window before raising `contextChars`.
@@ -383,7 +387,7 @@ Pi has decision models built into its model registry, [Jev](https://docs.typesaf
 { "classifier": { "provider": "openrouter", "model": "typesafe/jev-1.13", "askAbove": 0.5 } }
 ```
 
-This sends every classified command and its working directory to that provider. Commands can contain tokens and paths, so don't turn it on for work that has to stay on your machine. The rules still settle most calls locally, and only the commands they mark classify go out.
+This sends every classified command and its working directory to that provider. Commands can contain tokens and paths, so don't turn it on for work that has to stay on your machine. The rules still settle most calls locally, and only the commands they mark classify go out. Hermes has no model registry for a plugin to read, so a hosted decision model goes in `providers` with a key of its own.
 
 Jev was much better than the local models on my 50 commands:
 
@@ -632,7 +636,7 @@ No server and no questions. The install steps and the config are under [Stage 2:
 
 ## Stage 3: the chat decider
 
-This is the default stage after the rules. The calls the rules leave open go to a general chat model, and that model reads the same thing Claude Code's auto mode classifier reads: your own messages from the session and the tool calls the agent made, with the agent's own prose and all tool output stripped out. It answers block or allow, names the rule that fired, and gives a reason. With `llm.provider` and `llm.model` left empty it is the session's own model, and it changes when you switch the session's model.
+This is the default stage after the rules. The calls the rules leave open go to a general chat model, and that model reads the same thing Claude Code's auto mode classifier reads: your own messages from the session and the tool calls the agent made, with the agent's own prose and all tool output stripped out. It answers block or allow, names the rule that fired, and gives a reason. With `llm.provider` and `llm.model` left empty it is the session's own model, and it changes when you switch the session's model. In Hermes both keys are required and name an endpoint in `providers`.
 
 This is what the small decision models can't do, because they only see one command line:
 
@@ -673,7 +677,7 @@ Pi's model API has no stop sequences, so the filter pass gets 128 tokens instead
 
 ### Chat decider keys
 
-These go in the `llm` block. Every key is optional; what you leave out keeps its default.
+These go in the `llm` block. Every key is optional; what you leave out keeps its default. In Hermes, `provider` names a `providers` endpoint and `warmCache` is not read; every other key works the same.
 
 | Key | Default | What it does |
 | --- | --- | --- |
@@ -690,6 +694,8 @@ These go in the `llm` block. Every key is optional; what you leave out keeps its
 | `onBlock` | `"block"` | `block` denies and tells the agent to find a safer path. `ask` shows the confirm prompt. Without a UI a decider block is always a block, whatever `withoutUi.onAsk` says |
 | `maxConsecutiveDenials` | `3` | After this many denials in a row the human is asked instead (blocked without a UI) |
 | `maxTotalDenials` | `20` | ...and after this many in the session |
+
+`maxConsecutiveDenials` and `maxTotalDenials` count inside one process. In Hermes each call is its own process, so neither accumulates: see [What is not there in Hermes](#what-is-not-there-in-hermes).
 | `transcript.maxEntries` | `60` | Transcript lines kept. Tool lines are dropped before your messages, oldest first |
 | `transcript.maxChars` | `24000` | Size cap of the lines before the action, also shrunk to fit `contextWindow`. Tool lines go before your messages, oldest first. The action is never cut: one too long for the window is an error |
 | `transcript.toolInputChars` | `1200` | Cap per earlier tool call; file bodies are replaced by their size. The call under review is sent whole |
@@ -705,6 +711,8 @@ With no config it uses the session's own model. To pick one:
 ```json
 { "llm": { "provider": "llamastash", "model": "flash-next-128k" } }
 ```
+
+In Hermes `provider` names an endpoint from `providers`, and `contextWindow` should say what that endpoint really has: [Hermes agents](#hermes-agents).
 
 A local model through Pi's own provider, one lane of the shared server, with the limits set by hand:
 
@@ -757,16 +765,16 @@ The environment slots are what stop the internal-infrastructure false positives:
 
 ## Configuration
 
-Optional, in `~/.pi/agent/extensions/pi-automode-classifier/config.json`. A config with an error is ignored as a whole and you get a warning, so a typo can't half-apply. [`config.example.jsonc`](config.example.jsonc) lists every key at its default, with a comment for each. The config file itself is plain JSON, so drop the comments and keep only the keys you change.
+Optional, in `~/.pi/agent/extensions/pi-automode-classifier/config.json`. A config with an error is ignored as a whole and you get a warning, so a typo can't half-apply. [`config.example.jsonc`](config.example.jsonc) lists every key at its default, with a comment for each. The config file itself is plain JSON, so drop the comments and keep only the keys you change. A Hermes profile keeps the same keys in `<profile home>/automode-classifier/config.json`, and reads them fresh on every call.
 
 | Key | Default | What it does |
 | --- | --- | --- |
 | `enabled` | `true` | Starting state of a session. `/automode-classifier on` and `off` change it for that session |
-| `log` | `true` | Append every decision to `~/.local/state/pi-automode-classifier/decisions.jsonl` |
+| `log` | `true` | Append every decision to `~/.local/state/pi-automode-classifier/decisions.jsonl`, or in Hermes to `<profile home>/automode-classifier/decisions.jsonl` |
 | `rules` | all empty | Your own `deny`, `ask`, `classify` and `allow` patterns |
 | `allowedPaths` | `[]` | More directories where file changes are allowed, like the project directory |
 | `guardedPaths` | `[]` | More paths that count as the guard's own files, so changes to them always ask |
-| `promptTimeoutMs` | `60000` | A confirm prompt nobody answers is treated as a `Block` after this long, so an unattended session doesn't wait there forever. `0` waits forever |
+| `promptTimeoutMs` | `60000` | A confirm prompt nobody answers is treated as a `Block` after this long, so an unattended session doesn't wait there forever. `0` waits forever | Pi only: Hermes' approval gate has its own timeout |
 | `withoutUi.onAsk` | `"block"` | What to do with a call that needs a prompt when there is no UI: `block` or `allow`. Root, credential reads, downloaded code and this extension's own files are blocked either way, unless one of your rules matches |
 | `withoutUi.rules` | empty `allow` and `deny` | Patterns added to `rules` when there is no UI. A `deny` here wins over an `allow` in `rules` |
 | `decider` | from the blocks | The deciders in the order they run: `llm`, `classifier` and `command`, with `llm` last. Left out: `["command"]` when `command.argv` is set, `["classifier"]` when there is a `classifier` block, `["llm"]` otherwise. `[]`: every call the rules leave open asks you |
@@ -868,7 +876,7 @@ A profile that scores with LANCET and judges with a chat model on another machin
 | Stage 3 on the session's own model | an endpoint you name: `llm.provider` plus `providers`. Hermes hands a plugin no handle on the session's model |
 | Stage 2 through Pi's model registry | `classifier.provider` plus `providers`, or the local endpoint with `classifier.endpoint` and `startCommand`, which work the same in both |
 
-Everything else under [Configuration](#configuration) reads the same here: your own rule patterns, `allowedPaths`, `guardedPaths`, `withoutUi.rules`, the classifier questions and `classifier.contextChars`, `command.argv` for a classifier that runs as a process, the `llm.prompt` rule lists, `onBlock`, `onNoAnswer` and the denial caps. [Stage 1: rules](#stage-1-rules), [What asks you](#what-asks-you), [Scripts and programs](#scripts-and-programs) and [Credential files](#credential-files) all apply: they are the same code, and `Hermes` is the product name in their reasons.
+Everything else under [Configuration](#configuration) reads the same here: your own rule patterns, `allowedPaths`, `guardedPaths`, `withoutUi.rules`, the classifier questions and `classifier.contextChars`, `command.argv` for a classifier that runs as a process, the `llm.prompt` rule lists, and `onBlock` and `onNoAnswer`. [Stage 1: rules](#stage-1-rules), [What asks you](#what-asks-you), [Scripts and programs](#scripts-and-programs) and [Credential files](#credential-files) all apply: they are the same code, and `Hermes` is the product name in their reasons.
 
 ### What is not there in Hermes
 
@@ -876,6 +884,7 @@ Everything else under [Configuration](#configuration) reads the same here: your 
 - **`promptTimeoutMs`.** Hermes' approval gate has its own timeout; this one is not read.
 - **`llm.warmCache`.** It warms the Pi session's prefix cache at session start. Hermes has no session-start hook here to do it from, so the first decision pays the cold prefill.
 - **The session counts**, in `status`, and a decision log entry for what the person answered. An ask is logged as `"outcome": "ask"` with the rule and the reason that asked; allow and block are logged as in Pi.
+- **The denial caps.** `maxConsecutiveDenials` and `maxTotalDenials` count inside one process, and Hermes gives the guard a new one per call. Each block stands on its own, so a run of blocks never escalates on its own; Hermes' approval gate still decides each call by itself.
 - **The benches.** They drive Pi's handler.
 
 The transcript the chat decider reads is the messages Hermes gives a hook at the turn's start, plus the calls that finished in that turn. Tool output and the agent's own prose stay out of it, as in Pi, so a file the agent read cannot put instructions in front of the decider.
@@ -886,7 +895,7 @@ Stage 1 on its own costs about 85 ms per call on my machine, most of it Node sta
 
 ## How well does it do?
 
-`npm run bench` runs the suites in `bench/suites` through the built-in rules and a classifier model. The numbers below are from its `bench-cases` suite, 25 safe and 25 risky commands, measured with the earlier classifier-only bench script. The chat decider has its own bench, under [Chat decider configs](#chat-decider-configs). With Kev-0.8B Q8_0 on llama.cpp `5ad1c5da0`, 8 threads on a Ryzen AI Max+ 395:
+`npm run bench` runs the suites in `bench/suites` through the built-in rules and a classifier model. The numbers below are from its `bench-cases` suite, 25 safe and 25 risky commands, measured with the earlier classifier-only bench script. The chat decider has its own bench, under [Chat decider configs](#chat-decider-configs). Both benches drive the Pi handler; the verdicts are the same code a Hermes call gets, but a Hermes session is not driven here. With Kev-0.8B Q8_0 on llama.cpp `5ad1c5da0`, 8 threads on a Ryzen AI Max+ 395:
 
 | | Result |
 | --- | --- |
@@ -970,6 +979,8 @@ Any setup:
 - `make`, `npm run`, `cargo test` and similar are allowed by rule and can run anything the project defines. Add a `classify` or `ask` rule for the targets you care about.
 - Tools from other extensions without a `command` input are not checked.
 - English commands and paths only were tested.
+
+What a Hermes agent does not get is listed under [What is not there in Hermes](#what-is-not-there-in-hermes).
 
 ## Development
 
