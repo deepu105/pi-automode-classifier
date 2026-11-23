@@ -49,6 +49,23 @@ export type HookAnswer = { action: "allow" } | { action: "approve"; message: str
 const HOME = process.env.HOME ?? "";
 const home = (text: string) => text.replaceAll(HOME, "~");
 
+// How a Hermes tool result ended. The message carries no error flag of its own: the tool's own
+// dict says it, with `status: "error"` or an `error` key. Without this the decider would read every
+// failed call, and every call a security hook stopped, as one that ran.
+function toolFailed(body: unknown): boolean {
+  let value = body;
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return false;
+    }
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return record.status === "error" || record.error !== undefined;
+}
+
 // Hermes gives its hooks the messages in OpenAI form: an assistant message carries its tool calls,
 // and each result comes back as its own `tool` message. transcriptItems reads Pi's shape, so turn
 // the two into each other here and share the one transcript builder.
@@ -74,12 +91,14 @@ export function historyEntries(history: unknown[]): { message: Record<string, un
       }
       if (content.length) out.push({ message: { role: "assistant", content } });
     } else if (m.role === "tool") {
+      const body = typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? "");
       out.push({
         message: {
           role: "toolResult",
           toolCallId: m.tool_call_id,
           toolName: String(m.name ?? ""),
-          content: [{ type: "text", text: typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? "") }],
+          isError: toolFailed(m.content),
+          content: [{ type: "text", text: body }],
         },
       });
     } else if (m.role === "user") {

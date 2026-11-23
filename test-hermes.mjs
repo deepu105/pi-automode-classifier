@@ -14,6 +14,7 @@ const hook = path.join(repo, "hermes", "hook.ts");
 const { subject, TOOL_KIND } = await import("./hermes/tools.ts");
 const { chatEndpoint } = await import("./core/openai.ts");
 const { chatFor, historyEntries, providerRegistry, statusText } = await import("./hermes/host.ts");
+const { transcriptItems } = await import("./core/llm.ts");
 const { loadConfig } = await import("./core/config.ts");
 const { createGuard } = await import("./core/guard.ts");
 const { mergeState } = await import("./core/session.ts");
@@ -90,9 +91,21 @@ check("an assistant text and its call come through", entries[1], {
   role: "assistant",
   content: [{ type: "text", text: "I will look first" }, { type: "toolCall", id: "c1", name: "terminal", arguments: { command: "ls" } }],
 });
-check("the result of a call comes through", entries[2], { role: "toolResult", toolCallId: "c1", toolName: "terminal", content: [{ type: "text", text: "build\nsrc" }] });
+check("the result of a call comes through", entries[2], { role: "toolResult", toolCallId: "c1", toolName: "terminal", isError: false, content: [{ type: "text", text: "build\nsrc" }] });
 check("arguments that are not JSON stay text", entries[3].content[0].arguments, "not json");
 check("an assistant message with nothing in it is dropped", entries.length, 4);
+
+// How a call ended, read out of the Hermes message form. Hermes has no error flag on a tool message:
+// the tool's own dict says it. Without this the decider would read a failed call as one that ran.
+const endings = historyEntries([
+  { role: "user", content: "do it" },
+  { role: "assistant", content: "", tool_calls: [{ id: "c1", function: { name: "terminal", arguments: '{"command":"rm -rf /tmp/x"}' } }] },
+  { role: "tool", tool_call_id: "c1", name: "terminal", content: '{"status":"error","error":"no such file"}' },
+  { role: "assistant", content: "", tool_calls: [{ id: "c2", function: { name: "terminal", arguments: '{"command":"ls"}' } }] },
+  { role: "tool", tool_call_id: "c2", name: "terminal", content: '{"output":"build\nsrc"}' },
+]).map((e) => e.message);
+check("a result that says error is an error", endings[2].isError, true);
+check("a result without it is not", endings[4].isError, false);
 
 // The endpoints a config names
 const providers = { pc: { baseUrl: "http://127.0.0.1:9/v1", apiKey: "k" } };
@@ -290,6 +303,11 @@ const downloaded = path.join(workspace, "downloaded.sh");
 fs.writeFileSync(downloaded, "#!/bin/sh\necho downloaded\n");
 writeConfig({ decider: [], rules: { allow: ["curl *"] } });
 check("a download your own rule allows runs", decide("terminal", { command: `curl -o ${downloaded} http://example.com/x.sh` }, same), { action: "allow" });
+const { config: endingConfig } = loadConfig(configFile);
+const said = transcriptItems(endings.map((message) => ({ message })), endingConfig.llm, undefined, new Map([["c1", "blocked-by-permissions"]]));
+check("what the guard recorded about a call beats what its result says", said.filter((i) => i.kind === "tool")[0].outcome, "blocked-by-permissions");
+check("a call that failed reads as a failure", transcriptItems(endings.map((message) => ({ message })), endingConfig.llm).filter((i) => i.kind === "tool")[0].outcome, "error");
+check("a call that ran cleanly reads as it ran", transcriptItems(endings.map((message) => ({ message })), endingConfig.llm).filter((i) => i.kind === "tool")[1].outcome, "ok");
 check("the state file records the download", stateOf("one-session").files[downloaded], "fetched");
 writeConfig({ decider: [] });
 // An ask goes to Hermes' own approval gate: the person may allow it, so what the call would write
