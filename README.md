@@ -869,7 +869,7 @@ A profile that scores with LANCET and judges with a chat model on another machin
 
 | In Pi | In Hermes |
 | --- | --- |
-| The `bash`, `write`, `edit`, `read`, `grep` tools | `terminal`, `process_manage` and `execute_code` as commands; `write_file` and `patch` as file changes; `read_file` and `search_files` as reads |
+| The `bash`, `write`, `edit`, `read`, `grep` tools | `terminal`, `process_manage` and `execute_code` as commands; `write_file` and `patch` as file changes; `read_file` and `search_files` as reads; a `cronjob_manage` script as a command it runs later; `skill_manage` and `memory` as changes in the profile's own folders. [Every tool Hermes can use](#every-tool-hermes-can-use) has the whole list |
 | The confirm prompt | Hermes' approval gate. Its own timeout and approval rules decide what a repeat call costs |
 | Nobody to ask: print mode, most subagents | cron runs, kanban workers and programmatic platforms (`webhook`, `api_server`). `withoutUi.onAsk` decides there |
 | Pi's `settings.json` and this extension's files | the profile's `config.yaml`, `.env`, `SOUL.md`, `shell-hooks-allowlist.json`, the plugin folder and its config folder. Always ask, no rule opens them |
@@ -882,6 +882,31 @@ A profile that scores with LANCET and judges with a chat model on another machin
 | Stage 2 through Pi's model registry | `classifier.provider` plus `providers`, or the local endpoint with `classifier.endpoint` and `startCommand`, which work the same in both |
 
 Everything else under [Configuration](#configuration) reads the same here: your own rule patterns, `allowedPaths`, `guardedPaths`, `withoutUi.rules`, the classifier questions and `classifier.contextChars`, `command.argv` for a classifier that runs as a process, the `llm.prompt` rule lists, and `onBlock` and `onNoAnswer`. [Stage 1: rules](#stage-1-rules), [What asks you](#what-asks-you), [Scripts and programs](#scripts-and-programs) and [Credential files](#credential-files) all apply: they are the same code, and `Hermes` is the product name in their reasons.
+
+### Every tool Hermes can use
+
+Hermes 0.23.3 has 67 built-in tools, and a plugin or an MCP server can add more. [`hermes/tools.ts`](hermes/tools.ts) maps the ones that run a command or change a file; the guard judges those. A tool the map leaves out runs, exactly as an unknown tool does in Pi. This is the whole list, and what each part of it needs.
+
+| Tools | What they do | Why the guard decides as it does |
+| --- | --- | --- |
+| `terminal`, `process_manage`, `execute_code` | Run a shell line, manage a background process, run Python that calls Hermes tools | Judged as commands, the same rules Pi's `bash` tool gets |
+| `write_file`, `patch` | Replace a file, edit one | Judged as file changes: `write_file` sets a file's origin to "this session wrote it", `patch` keeps the origin it had |
+| `read_file`, `search_files` | Read a file, search files and content | Reads are not checked, except a credential file, which always asks |
+| `cronjob_manage` | Schedule a job: a prompt, a `script` the scheduler runs each tick, or a `monitor` (a URL or a script) | A scheduled script runs later with no guard in front of it, so it is judged now, by the rules for running a file: one this session wrote goes to the chat decider, one it downloaded asks. A job with only a prompt is left alone: the calls it makes are guarded when it fires |
+| `skill_manage`, `memory` | Write a skill document, or a note in `MEMORY.md` / `USER.md` | Neither names the file it changes, so the guard judges the change as one inside `<profile home>/skills` or `<profile home>/memories`. These are instructions the next session reads, so they are judged like the profile's own files, not like project code |
+| `delegate_task` | Start subagents with their own context | Not mapped, because a child needs no decision for its own work: Hermes runs each child through `child.run_conversation(...)`, the same loop that fires `pre_tool_call`, so every call a child makes is judged on its own, in its own session. The parent's call carries the child's goal, which the chat decider can read |
+| `browser_exec`, `browser_cdp`, `browser_dialog`, `browser_vault` | Drive a browser: Python against the browser helpers, raw CDP calls, dialogs, vault logins | No command and no file path to read, so no decision. Pi has no browser tool either. `browser_exec` runs Python, and that Python is not judged: a session whose toolsets lack `terminal` never gets the tool at all |
+| `web_search`, `web_extract`, `x_search`, `session_search`, `vision_analyze` | Search the web and past sessions, read a page, look at an image | Reads; nothing is run or written |
+| `image_generate`, `video_analyze`, `video_generate`, `xai_video_edit`, `xai_video_extend`, `text_to_speech` | Make or read media through a provider | A generated file is content, not code the agent wrote; the provider call is what it looks like |
+| `discord`, `discord_admin`, `feishu_doc_read`, `feishu_drive_add_comment`, `feishu_drive_list_comments`, `feishu_drive_list_comment_replies`, `feishu_drive_reply_comment` | Read and post on one messaging platform | A platform call through that platform's own API; no local command or file |
+| `kanban_create`, `kanban_list`, `kanban_show`, `kanban_link`, `kanban_unblock`, `kanban_attach`, `kanban_attach_url`, `kanban_attachments`, `kanban_heartbeat`, `kanban_comment`, `kanban_complete`, `kanban_block`, `kanban_request_review`, `kanban_request_changes` | Multi-agent task board: fan out tasks, claim them, hand them back, comment, attach | Task state and messages. The work a worker does is guarded in the worker's own session |
+| `todo_list`, `clarify` | Keep the plan for this session, ask the person a question | Hermes' own state, and a question. Nothing runs |
+| `skills_list`, `skill_view` | List the skills, read one | Reads |
+| `manage_catalog`, `manage_connections` | Ask for a catalog plugin or skill install, list remote connectors and their authorization links | A catalog install runs through the desktop's own approval card, and only in a desktop session; a connector call goes to the remote service, not to this machine |
+| `desktop_project`, `read_terminal`, `close_terminal`, `desktop_preview`, `drive_preview`, `annotate_preview`, `read_window_below`, `focus_pane`, `react_to_message`, `set_theme`, `show_tip`, `gui_tour`, `setup_beat` | Desktop app affordances: switch a project, read a pane, scroll a preview, change the look | GUI actions, most of them only offered in a desktop session. `close_terminal` closes a pane; the command in it already went through the guard |
+| `computer_use` | Drive the desktop: screenshot, click, type, scroll, in a window or an app | No command text and no file path, so nothing can be judged. It can type into a terminal window, which is outside the guard's reach: turn the `computer_use` toolset off if that matters here |
+
+Anything a plugin or an MCP server registers is not in the map, and runs. Hermes names plugin tools by what the plugin calls them, so a plugin that runs a command needs its own rule; say so in the profile's `rules.ask`.
 
 ### What is not there in Hermes
 

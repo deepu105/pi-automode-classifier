@@ -38,7 +38,7 @@ async function run(request: HookRequest): Promise<HookAnswer> {
       guarded: request.guarded ?? [],
       ownDirs: request.ownDirs ?? [],
       log: (entry) => appendLog(request.log, config.log, entry),
-      subject,
+      subject: (tool, input) => subject(tool, input, request.paths),
     },
     base,
   );

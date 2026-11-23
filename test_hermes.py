@@ -221,6 +221,16 @@ class Wrapper(unittest.TestCase):
         for name in ("config.yaml", ".env", "SOUL.md", "shell-hooks-allowlist.json"):
             self.assertIn(str(FIXTURE / name), locked)
         self.assertEqual(request["ownDirs"], [str(FIXTURE / "plugins")])
+        self.assertEqual(
+            request["paths"],
+            {"skills": str(FIXTURE / "skills"), "memories": str(FIXTURE / "memories"), "scripts": str(FIXTURE / "scripts")},
+        )
+
+    def test_a_skill_change_is_judged_as_a_change_in_the_skills_folder(self):
+        """`skill_manage` names a skill, not a path: the folder it writes in is what gets judged."""
+        answer = self.ctx.guard("skill_manage", {"operations": [{"action": "create", "name": "notes", "content": "x"}]})
+        self.assertIsNotNone(answer, "a skill change is not left undecided")
+        self.assertEqual(answer["action"], "approve")
 
     def test_the_request_names_the_session_and_its_state_folder(self):
         request, _ = self.plugin._request("s-9", tool="terminal", args={"command": "ls"})

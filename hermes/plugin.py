@@ -68,8 +68,13 @@ def _profile_home() -> Path:
     return base
 
 
-def _paths(home: Path) -> tuple[list[str], list[str]]:
-    """Locked paths, and the paths that name this product. See core/guard.ts."""
+def _paths(home: Path) -> tuple[list[str], list[str], dict[str, str]]:
+    """Locked paths, the paths that name this product, and the folders the tools write in.
+
+    The last group is for the tools that reach a file without giving a path the rules can read:
+    ``skill_manage`` names a skill, ``memory`` a note, and a cron script is relative to
+    ``<home>/scripts/``. See hermes/tools.ts and core/guard.ts.
+    """
     automode = home / "automode-classifier"
     locked = [
         str(_PLUGIN_DIR),
@@ -79,7 +84,7 @@ def _paths(home: Path) -> tuple[list[str], list[str]]:
         str(home / "SOUL.md"),
         str(home / "shell-hooks-allowlist.json"),
     ]
-    return locked, [str(home / "plugins")]
+    return locked, [str(home / "plugins")], {"skills": str(home / "skills"), "memories": str(home / "memories"), "scripts": str(home / "scripts")}
 
 
 def approval_possible(platform: str) -> bool:
@@ -114,7 +119,7 @@ def _request(session_id: str, mode: str = "decide", tool: str = "", args: dict |
     config_file = home / "automode-classifier" / "config.json"
     raw = node_hook.raw_config(config_file)
     session = SESSIONS.take(session_id)
-    guarded, own = _paths(home)
+    guarded, own, writes = _paths(home)
     request = {
         "mode": mode,
         "config": str(config_file),
@@ -122,6 +127,7 @@ def _request(session_id: str, mode: str = "decide", tool: str = "", args: dict |
         "log": str((home / "automode-classifier" / "decisions.jsonl")),
         "guarded": guarded,
         "ownDirs": own,
+        "paths": writes,
         "hasUI": approval_possible(session.get("platform", "")),
         "history": session.get("history", []),
         "providers": node_hook.resolve_providers(raw),

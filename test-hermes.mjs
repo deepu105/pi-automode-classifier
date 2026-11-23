@@ -11,7 +11,7 @@ import path from "node:path";
 
 const repo = import.meta.dirname;
 const hook = path.join(repo, "hermes", "hook.ts");
-const { subject } = await import("./hermes/tools.ts");
+const { subject, TOOL_KIND } = await import("./hermes/tools.ts");
 const { chatEndpoint } = await import("./core/openai.ts");
 const { chatFor, historyEntries, providerRegistry, statusText } = await import("./hermes/host.ts");
 const { loadConfig } = await import("./core/config.ts");
@@ -41,6 +41,25 @@ check("a tool no rule covers is left alone", subject("browser", { url: "http://x
 check("a missing argument is left alone", subject("terminal", {}), undefined);
 check("an argument that is not text is left alone", subject("terminal", { command: 5 }), undefined);
 check("no arguments at all is left alone", subject("write_file", undefined), undefined);
+
+// The tools that reach a file or a command without naming it in one argument.
+const hostPaths = { skills: "/p/skills", memories: "/p/memories", scripts: "/p/scripts" };
+check("a scheduled script is judged as the file the scheduler will run", subject("cronjob_manage", { action: "create", script: "backup.sh" }, hostPaths), { kind: "bash", label: "cronjob_manage", subject: "/p/scripts/backup.sh" });
+check("an absolute script is judged as it stands", subject("cronjob_manage", { action: "update", script: "/srv/nightly.sh" }, hostPaths), { kind: "bash", label: "cronjob_manage", subject: "/srv/nightly.sh" });
+check("a monitor that names a script counts as one", subject("cronjob_manage", { action: "create", monitor: "check.sh" }, hostPaths), { kind: "bash", label: "cronjob_manage", subject: "/p/scripts/check.sh" });
+check("a monitor that is a URL runs nothing", subject("cronjob_manage", { action: "create", monitor: "https://example.com/feed" }, hostPaths), undefined);
+check("a job with only a prompt is left to its own guarded run", subject("cronjob_manage", { action: "create", prompt: "summarise the day" }, hostPaths), undefined);
+check("listing the jobs changes nothing", subject("cronjob_manage", { action: "list" }, hostPaths), undefined);
+check("a skill write is a change in the skills folder", subject("skill_manage", { operations: [{ action: "create", name: "notes" }] }, hostPaths), { kind: "write", label: "write", subject: "/p/skills" });
+check("a memory note is a change in the memories folder", subject("memory", { target: "memory", operations: [] }, hostPaths), { kind: "write", label: "write", subject: "/p/memories" });
+check("without the folders from the host those tools are left alone", subject("skill_manage", { operations: [] }), undefined);
+
+// Every tool Hermes 0.23.3 can give an agent, from toolsets.py's BUILTIN_TOOL_NAMES. Each one is
+// either in the map or named in the README's Hermes table with why it needs no decision.
+const HERMES_TOOLS = "annotate_preview browser_cdp browser_dialog browser_exec browser_vault clarify close_terminal computer_use cronjob_manage delegate_task desktop_preview desktop_project discord discord_admin drive_preview execute_code feishu_doc_read feishu_drive_add_comment feishu_drive_list_comment_replies feishu_drive_list_comments feishu_drive_reply_comment focus_pane gui_tour image_generate kanban_attach kanban_attach_url kanban_attachments kanban_block kanban_comment kanban_complete kanban_create kanban_heartbeat kanban_link kanban_list kanban_request_changes kanban_request_review kanban_show kanban_unblock manage_catalog manage_connections memory patch process_manage react_to_message read_file read_terminal read_window_below search_files session_search set_theme setup_beat show_tip skill_manage skill_view skills_list terminal text_to_speech todo_list video_analyze video_generate vision_analyze web_extract web_search write_file x_search xai_video_edit xai_video_extend".split(" ");
+const hermesDoc = fs.readFileSync(path.join(repo, "README.md"), "utf8").split("## Hermes agents")[1]?.split("## How well does it do?")[0] ?? "";
+check("every Hermes tool is mapped or explained in the README", HERMES_TOOLS.filter((name) => !(name in TOOL_KIND) && !hermesDoc.includes(`\`${name}\``)), []);
+check("the map names only tools Hermes really has", Object.keys(TOOL_KIND).filter((name) => !HERMES_TOOLS.includes(name)), []);
 
 // The session text Hermes passes
 const history = [

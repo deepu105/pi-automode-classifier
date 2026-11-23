@@ -34,6 +34,9 @@ export interface HookRequest {
   // every call starts with nothing: no file origins, no counts, no denial caps.
   session?: string;
   sessions?: string;
+  // Folders of this profile the tools write in without naming them, by the name hermes/tools.ts
+  // uses: "skills", "memories". A tool with no path to judge is left alone.
+  paths?: Record<string, string>;
   // Endpoints by the name the config's providers give, with the key resolved from the profile.
   providers?: Record<string, ChatEndpoint>;
   // Set when this session chose `on` or `off` with the slash command: it beats the config's enabled.
