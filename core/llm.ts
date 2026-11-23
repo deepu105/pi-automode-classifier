@@ -172,6 +172,10 @@ export async function decideWithLlm(
 // Claude Code sees user messages and tool calls, and nothing else: no assistant prose, no tool
 // results. That is reasoning-blind by design, which keeps a talked-into classifier out of reach
 // and keeps hostile tool output out of the decision.
+// The session text of the warming call: one throwaway answer, so the rule prompt sits in the
+// endpoint's prefix cache before the first call that needs an answer. Nothing is decided from it.
+export const warmTranscript = (tool: string): TranscriptItem[] => [{ kind: "user", text: "warming the rule prompt" }, { kind: "action", tool, input: { command: "true" } }];
+
 export function transcriptItems(
   entries: { message?: Record<string, unknown> }[],
   llm: LlmConfig,

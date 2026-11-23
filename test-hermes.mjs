@@ -377,12 +377,16 @@ chatAnswer = "<block>no</block>";
 
 // A session nobody used for a week is gone.
 const stale = path.join(sessions, "stale-session.json");
+const orphan = `${stale}.999.deadbeef.tmp`; // a save whose process died before the rename
 fs.writeFileSync(stale, "{}");
+fs.writeFileSync(orphan, "{}");
 const week = 8 * 24 * 60 * 60 * 1000;
 const longAgo = new Date(Date.now() - week);
 fs.utimesSync(stale, longAgo, longAgo);
+fs.utimesSync(orphan, longAgo, longAgo);
 decide("terminal", { command: "ls" }, same);
 ok("a session idle for over a week is deleted", !fs.existsSync(stale));
+ok("and so is a save left half-written", !fs.existsSync(orphan));
 const stateWith = (over = {}) => ({ files: {}, roots: {}, outcomes: {}, counts: { rule: 0, model: 0, asked: 0, blocked: 0 }, denials: { consecutive: 0, total: 0 }, ...over });
 check("two parallel calls of one session add up instead of overwriting", mergeState(stateWith({ files: { b: "fetched" }, roots: { "/x": ["/x"] }, counts: { rule: 1, model: 1, asked: 0, blocked: 0 }, denials: { consecutive: 1, total: 1 } }), stateWith({ counts: { rule: 1, model: 0, asked: 0, blocked: 0 }, denials: { consecutive: 0, total: 0 } }), stateWith({ files: { a: "authored" }, roots: { "/y": ["/y"] }, counts: { rule: 2, model: 0, asked: 0, blocked: 0 }, denials: { consecutive: 1, total: 1 } })), stateWith({ files: { b: "fetched", a: "authored" }, roots: { "/x": ["/x"], "/y": ["/y"] }, counts: { rule: 2, model: 1, asked: 0, blocked: 0 }, denials: { consecutive: 2, total: 2 } }));
 check(

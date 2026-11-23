@@ -97,15 +97,32 @@ def _paths(home: Path) -> tuple[list[str], list[str], dict[str, str]]:
     return list(dict.fromkeys(locked)), [str(home)], {"skills": str(home / "skills"), "memories": str(home / "memories"), "scripts": str(home / "scripts")}
 
 
+def _single_query() -> bool:
+    """True for a run nobody is watching: ``hermes chat -q``, or ``hermes -z`` over the daemon.
+
+    Such a run sets ``HERMES_INTERACTIVE`` so a sudo password prompt works, but nobody is there to
+    answer an approval. Hermes knows this itself, so its own check is asked first; the marker it
+    leaves behind is the fallback when that check cannot be imported.
+    """
+    try:
+        from tools.approval_context import _is_single_query_approval_context
+
+        return bool(_is_single_query_approval_context())
+    except Exception:
+        return _truthy(_session_env("HERMES_SINGLE_QUERY_SESSION"))
+
+
 def approval_possible(platform: str) -> bool:
     """True when a person could answer an approval for this session.
 
     Follows how Hermes resolves an approval: an interactive CLI, or a gateway chat that is not a
-    programmatic platform. Cron and kanban runs have nobody to answer. Hermes denies an approval no
-    one answers, so a session like this gets the config's `withoutUi` answer instead.
+    programmatic platform. Cron, kanban and single-query runs have nobody to answer. Hermes denies an
+    approval no one answers, so a session like this gets the config's `withoutUi` answer instead.
     """
     # A cron run sets a flag; a kanban worker names the task it works on. Neither has a person.
     if _truthy(os.environ.get("HERMES_CRON_SESSION")) or os.environ.get("HERMES_KANBAN_TASK"):
+        return False
+    if _single_query():
         return False
     if _truthy(os.environ.get("HERMES_INTERACTIVE")):
         return True
@@ -163,7 +180,8 @@ def _request(session_id: str, mode: str = "decide", tool: str = "", args: dict |
 def _guard_tool_call(tool_name: str, args: dict, task_id: str = "", session_id: str = "", tool_call_id: str = "", **kwargs):
     """Ask the guard about one call, before it runs."""
     if not isinstance(args, dict):
-        return None  # nothing to read the call from; Hermes deals with it
+        # Nothing to read the call from, and an unknown call is not a safe one.
+        return {"action": "approve", "message": f"auto mode could not read the {tool_name} call; approve only if you know it is safe", "rule_key": f"automode:{tool_name}:guard-failed"}
     session_id = session_id or task_id
     try:
         request, budget = _request(session_id, tool=tool_name, args=args, tool_call_id=tool_call_id)

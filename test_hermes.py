@@ -19,6 +19,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from types import ModuleType
 from unittest import mock
 
 REPO = Path(__file__).resolve().parent
@@ -108,8 +109,11 @@ class Wrapper(unittest.TestCase):
     def test_an_unmapped_tool_runs(self):
         self.assertIsNone(self.ctx.guard("browser", {"url": "http://example.com"}))
 
-    def test_arguments_that_are_not_a_dict_are_left_to_hermes(self):
-        self.assertIsNone(self.ctx.guard("terminal", "ls"))
+    def test_arguments_that_are_not_a_dict_go_to_the_gate(self):
+        """Nothing to read the call from is not the same as a call found safe."""
+        answer = self.ctx.guard("terminal", "ls -la")
+        self.assertEqual(answer["action"], "approve")
+        self.assertIn("could not read", answer["message"])
 
     def test_a_denied_command_is_blocked_with_a_reason(self):
         answer = self.ctx.guard("terminal", {"command": "rm -rf /"})
@@ -168,6 +172,17 @@ class Wrapper(unittest.TestCase):
             self.assertFalse(possible("cli"))
         with patch_env({"HERMES_INTERACTIVE": "1", "HERMES_KANBAN_TASK": "task-7"}):
             self.assertFalse(possible("cli"))
+        # `hermes chat -q` exports HERMES_INTERACTIVE so sudo works, and nobody is waiting.
+        with patch_env({"HERMES_INTERACTIVE": "1", "HERMES_SINGLE_QUERY_SESSION": "1"}):
+            self.assertFalse(possible("cli"))
+
+    def test_a_single_query_run_of_hermes_own_check_is_not_interactive(self):
+        """Hermes knows a -q run has nobody to answer, and says so itself; the plugin asks it."""
+        fake = ModuleType("tools.approval_context")
+        fake._is_single_query_approval_context = lambda: True
+        with mock.patch.dict(sys.modules, {"tools": ModuleType("tools"), "tools.approval_context": fake}):
+            with patch_env({"HERMES_INTERACTIVE": "1", "HERMES_SINGLE_QUERY_SESSION": ""}):
+                self.assertFalse(self.plugin.approval_possible("cli"))
 
     # the session text
     def test_the_turn_message_is_kept_when_history_lacks_it(self):

@@ -40,10 +40,9 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { TranscriptItem } from "./automode.ts";
 import { isStrings, loadConfig as loadCoreConfig } from "./core/config.ts";
 import { classifierProcessRunning, health, startServer, stopClassifierProcess } from "./core/classifier.ts";
-import { decideWithLlm, llmName, transcriptItems, type ChatRegistry } from "./core/llm.ts";
+import { decideWithLlm, llmName, transcriptItems, warmTranscript, type ChatRegistry } from "./core/llm.ts";
 import { appendLog } from "./core/util.ts";
 import { noUiText, promptClause, scoreBands, sessionRow, someRules, statusRow } from "./core/status.ts";
 import { createGuard, type GuardSubject, type GuardSession } from "./core/guard.ts";
@@ -160,8 +159,7 @@ export default function (pi: ExtensionAPI, overrides: Partial<ReturnType<typeof 
     // With the chat decider the fixed rule prompt is some 25k tokens, and a cold prefill costs
     // the first real call tens of seconds. One throwaway call fills the prefix cache instead.
     if (guard.status().enabled && config.decider.includes("llm") && config.llm.warmCache) {
-      const warm: TranscriptItem[] = [{ kind: "user", text: "warming the rule prompt" }, { kind: "action", tool: "bash", input: { command: "true" } }];
-      void decideWithLlm(config, warm, undefined, ctx.modelRegistry as unknown as ChatRegistry, ctx.model as unknown as Record<string, unknown>).catch(() => undefined);
+      void decideWithLlm(config, warmTranscript("bash"), undefined, ctx.modelRegistry as unknown as ChatRegistry, ctx.model as unknown as Record<string, unknown>).catch(() => undefined);
     }
   });
   pi.on("session_shutdown", async () => stopClassifierProcess());

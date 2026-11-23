@@ -112,7 +112,8 @@ export function pruneSessions(dir: string): number {
   }
   let removed = 0;
   for (const name of names) {
-    if (!name.endsWith(".json") && !name.endsWith(".warm")) continue;
+    // The `.tmp` of a save is seen only as the rename; one left behind is from a process that died.
+    if (!name.endsWith(".json") && !name.endsWith(".warm") && !name.endsWith(".tmp")) continue;
     try {
       if (Date.now() - fs.statSync(path.join(dir, name)).mtimeMs > MAX_AGE_MS) {
         fs.unlinkSync(path.join(dir, name));

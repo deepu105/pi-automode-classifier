@@ -5,8 +5,7 @@ import fs from "node:fs";
 import { health } from "../core/classifier.ts";
 import type { Config } from "../core/config.ts";
 import type { Guard } from "../core/guard.ts";
-import type { TranscriptItem } from "../automode.ts";
-import { decideWithLlm, transcriptItems, type ChatRegistry, type Registry } from "../core/llm.ts";
+import { decideWithLlm, transcriptItems, warmTranscript, type ChatRegistry, type Registry } from "../core/llm.ts";
 import { chatEndpoint, type ChatEndpoint } from "../core/openai.ts";
 import { noUiText, promptClause, scoreBands, sessionRow, someRules, statusRow } from "../core/status.ts";
 
@@ -165,9 +164,8 @@ export async function statusText(config: Config, guard: Guard, request: HookRequ
 // One throwaway chat call, so the decider's fixed rule prompt sits in the endpoint's prefix cache
 // before the first call that needs an answer. The answer is dropped; nothing here waits on it.
 export async function warmCache(config: Config, providers: Record<string, ChatEndpoint>): Promise<void> {
-  const warm: TranscriptItem[] = [{ kind: "user", text: "warming the rule prompt" }, { kind: "action", tool: "terminal", input: { command: "true" } }];
   try {
-    await decideWithLlm(config, warm, undefined, chatFor(config, providers));
+    await decideWithLlm(config, warmTranscript("terminal"), undefined, chatFor(config, providers));
   } catch {
     // A warm call that fails costs nothing: the first real decision warms the cache itself.
   }
