@@ -828,6 +828,8 @@ hermes plugins doctor ~/.hermes/plugins/automode-classifier   # discovery, the m
 hermes plugins list                         # enable it if it shows disabled
 ```
 
+Hermes' own installer, `hermes plugins install`, refuses this plugin: its scanner reads a guard's rule list as a list of dangerous commands, calls the plugin dangerous, and `--force` does not override that. Clone the folder instead, as above, and update it with `git pull` there. `hermes plugins validate` fails on that same scan and passes every other check, including the probe that runs `register(ctx)`; `hermes plugins doctor` passes.
+
 Each profile keeps its own config in `<profile home>/automode-classifier/config.json`, and its decision log beside it. Only the keys you change are needed. The one almost every profile needs is the hook timeout, because Hermes abandons a `pre_tool_call` callback at `plugins.hook_callback_timeout` (30 s by default) and blocks the tool:
 
 ```yaml
