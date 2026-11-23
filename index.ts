@@ -126,7 +126,9 @@ export default function (pi: ExtensionAPI, overrides: Partial<ReturnType<typeof 
       registry: registry as GuardSession["registry"],
       sessionModel: ctx.model as unknown as Record<string, unknown> | undefined,
       transcript: (pending, decided) => transcriptItems(branch, config.llm, pending, decided),
-      notify: (message, level) => ctx.ui.notify(message, level),
+      // Only where there is a UI: Pi showed these notes when a person could see them, and a
+      // headless session has nowhere to put one.
+      notify: ctx.hasUI ? (message: string, level: "info" | "warning") => ctx.ui.notify(message, level) : undefined,
       persist: ({ dir, pattern }) => {
         const error = dir ? saveToConfig("allowedPaths", dir) : saveToConfig("allow", pattern!);
         return error && `pi-automode-classifier: ${error}`;

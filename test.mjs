@@ -578,7 +578,8 @@ extension(
 const answers = [];
 const offered = [];
 const titles = [];
-const ui = { notify: () => {}, select: async (title, options) => (offered.push(options), titles.push(title), answers.shift()) };
+const notices = [];
+const ui = { notify: (text) => notices.push(text), select: async (title, options) => (offered.push(options), titles.push(title), answers.shift()) };
 const handle = async (want, label, toolName, input, hasUI, answer) => {
   if (answer) answers.push(answer);
   const blocked = Boolean((await handlers.tool_call({ toolName, input }, { cwd: project, hasUI, ui }))?.block);
@@ -587,6 +588,13 @@ const handle = async (want, label, toolName, input, hasUI, answer) => {
 };
 await handle("run", "ls runs", "bash", { command: "ls -la" }, false);
 await handle("run", "read tool is not covered", "read", { path: "~/.bashrc" }, false);
+// A note is for the person watching the session; a headless call has nobody to show one to.
+notices.length = 0;
+await handlers.tool_call({ toolName: "bash", input: { command: "rm -rf /" } }, { cwd: project, hasUI: false, ui });
+check("x", { action: notices.length === 0 ? "x" : notices.join(" | ") }, "handler: no note without a UI");
+notices.length = 0;
+await handlers.tool_call({ toolName: "bash", input: { command: "rm -rf /" } }, { cwd: project, hasUI: true, ui });
+check("x", { action: notices.length === 1 && notices[0].startsWith("Blocked bash:") ? "x" : notices.join(" | ") }, "handler: a blocked call is said out loud when a person is here");
 // The words a blocked call gives back are what the user and the model read; Pi has said it this way
 // since the first version.
 const blockedWords = String((await handlers.tool_call({ toolName: "bash", input: { command: "rm -rf /" } }, { cwd: project, hasUI: false, ui }))?.reason);
