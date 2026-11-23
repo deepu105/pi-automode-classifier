@@ -249,7 +249,7 @@ class Wrapper(unittest.TestCase):
         self.assertIn(str(REPO), locked)
         for name in ("config.yaml", ".env", "SOUL.md", "shell-hooks-allowlist.json"):
             self.assertIn(str(FIXTURE / name), locked)
-        self.assertEqual(request["ownDirs"], [str(FIXTURE)])
+        self.assertEqual(request["ownDirs"], [str(FIXTURE / name) for name in ("plugins", "skills", "memories", "scripts", "shell-hooks.d")])
         self.assertEqual(
             request["paths"],
             {"skills": str(FIXTURE / "skills"), "memories": str(FIXTURE / "memories"), "scripts": str(FIXTURE / "scripts")},
@@ -261,6 +261,11 @@ class Wrapper(unittest.TestCase):
         request, _ = self.plugin._request("s1", tool="terminal", args={"command": "ls"})
         self.assertIn(str(FIXTURE / "profiles" / "generic" / "automode-classifier"), request["guarded"])
         self.assertIn(str(FIXTURE / "profiles" / "generic" / "config.yaml"), request["guarded"])
+
+    def test_the_sessions_own_folder_is_not_the_products_own_files(self):
+        """The session works in its own folder; holding it as Hermes' own files would hold the work."""
+        answer = self.ctx.guard("write_file", {"path": str(WORKSPACE / "notes.md"), "content": "hi"})
+        self.assertNotIn("own files", json.dumps(answer))
 
     def test_a_write_to_another_profiles_guard_config_is_locked(self):
         other = FIXTURE / "profiles" / "generic" / "automode-classifier"

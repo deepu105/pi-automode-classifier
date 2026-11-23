@@ -79,6 +79,11 @@ def _homes(home: Path) -> list[Path]:
 # One home's files that decide what a session may do. A change to any of them is locked: no rule
 # and no decider opens them.
 _LOCKED = ("automode-classifier", "plugins/automode-classifier", "config.yaml", ".env", "SOUL.md", "shell-hooks-allowlist.json")
+# Folders whose files decide how a later session behaves: skills it can load, notes it reads back,
+# scripts a cron job runs, hooks that run on every session. A change in one of them is held as the
+# product's own files. Not the whole home: Hermes keeps the session's own working folders there too
+# (a profile's `workspace`, its logs, its scratch), and those belong to the session, not to Hermes.
+_OWN = ("plugins", "skills", "memories", "scripts", "shell-hooks.d")
 
 
 def _paths(home: Path) -> tuple[list[str], list[str], dict[str, str]]:
@@ -88,13 +93,16 @@ def _paths(home: Path) -> tuple[list[str], list[str], dict[str, str]]:
     ``skill_manage`` names a skill, ``memory`` a note, and a cron script is relative to
     ``<home>/scripts/``. See hermes/tools.ts and core/guard.ts.
 
-    Every home of this install is locked, not just the one this call reads: from one profile a model
-    can otherwise write another profile's guard config and switch the guard off there.
+    Every home of this install is locked and held, not just the one this call reads: from one profile
+    a model can otherwise write another profile's guard config, or edit the skills and notes that
+    profile loads.
     """
     locked = [str(_PLUGIN_DIR)]
-    for one in _homes(home):
+    homes = _homes(home)
+    for one in homes:
         locked += [str(one / name) for name in _LOCKED]
-    return list(dict.fromkeys(locked)), [str(home)], {"skills": str(home / "skills"), "memories": str(home / "memories"), "scripts": str(home / "scripts")}
+    own = [str(one / name) for one in homes for name in _OWN]
+    return list(dict.fromkeys(locked)), own, {"skills": str(home / "skills"), "memories": str(home / "memories"), "scripts": str(home / "scripts")}
 
 
 def _single_query() -> bool:
