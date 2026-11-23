@@ -181,6 +181,22 @@ class Wrapper(unittest.TestCase):
         store.start_turn("big", big)
         self.assertEqual(len(store.take("big")["history"]), self.nh.MAX_HISTORY)
 
+
+    def test_the_node_of_the_hermes_install_is_found_for_a_profile(self):
+        """A profile run has no node of its own: Hermes keeps it in the install home."""
+        node = FIXTURE / ".hermes" / "tools" / "node-26.1.0-linux-x64" / "bin"
+        node.mkdir(parents=True)
+        stub = node / "node"
+        stub.write_text('#!/bin/sh\necho v26.1.0\n')
+        stub.chmod(0o755)
+        with patch_env({"HOME": str(FIXTURE), "HERMES_HOME": str(FIXTURE / ".hermes" / "profiles" / "tech"), "PATH": "/nonexistent"}):
+            self.nh._NODE = None
+            try:
+                found = self.nh.node_binary()
+            finally:
+                self.nh._NODE = None
+        self.assertEqual(found, str(stub))
+
     # which config applies
     def test_the_profile_home_holds_the_config(self):
         (FIXTURE / "profiles" / "tech" / "automode-classifier").mkdir(parents=True)

@@ -32,9 +32,9 @@ _NODE: str | None = None
 def node_binary() -> str:
     """A node that runs TypeScript directly: 22.18 or newer. A node on PATH wins; else Hermes' own.
 
-    Hermes installs its node under ``<HERMES_HOME>/tools/node-<version>/bin``. Only the newest
-    folder is tried, and a node too old to strip types is refused with a clear message. The answer
-    is kept: every tool call would else pay for a ``node --version`` run.
+    Hermes keeps its node under ``tools/node-<version>/bin`` in the home that downloaded it. A node
+    too old to strip types is refused with a clear message. The answer is kept: every tool call
+    would else pay for a ``node --version`` run.
     """
     global _NODE
     if _NODE:
@@ -44,16 +44,36 @@ def node_binary() -> str:
 
 
 def _find_node() -> str:
-    found = shutil.which("node")
-    if found and _new_enough(found):
-        return found
-    root = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes") / "tools"
-    dirs = sorted((d for d in root.glob("node-*") if (d / "bin" / "node").is_file()), key=_version_key, reverse=True)
-    for d in dirs:
-        candidate = d / "bin" / "node"
-        if _new_enough(str(candidate)):
-            return str(candidate)
+    for candidate in _node_candidates():
+        if _new_enough(candidate):
+            return candidate
     raise RuntimeError("auto mode needs Node 22.18 or newer (it runs a .ts file directly); none found")
+
+
+def _node_candidates() -> "list[str]":
+    """Every node worth trying: the one on PATH, then Hermes' own, newest folder first.
+
+    A profile run sets HERMES_HOME to the profile home, and Hermes keeps its node in the install
+    home (``~/.hermes/tools``), not in the profile home. So both are searched, and a profile home
+    reaches past itself to the home that holds its tool downloads.
+    """
+    out: "list[str]" = []
+    on_path = shutil.which("node")
+    if on_path:
+        out.append(on_path)
+    homes = []
+    env_home = os.environ.get("HERMES_HOME")
+    if env_home:
+        homes.append(Path(env_home).expanduser())
+    install = Path.home() / ".hermes"
+    homes.append(install)
+    for home in list(homes):
+        if home.parent.name == "profiles":  # <home>/profiles/<name>: its tools are two levels up
+            homes.append(home.parent.parent)
+    for tools in dict.fromkeys(home / "tools" for home in homes):
+        folders = sorted((d for d in tools.glob("node-*") if (d / "bin" / "node").is_file()), key=_version_key, reverse=True)
+        out.extend(str(d / "bin" / "node") for d in folders)
+    return list(dict.fromkeys(out))
 
 
 def _version_key(path: Path) -> tuple:
