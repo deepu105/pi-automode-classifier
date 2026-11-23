@@ -63,9 +63,10 @@ export function mergeState(stored: GuardState, base: GuardState, now: GuardState
 export function saveState(file: string, base: GuardState, now: GuardState): void {
   const dir = path.dirname(file);
   const lock = `${file}.lock`;
-  const locked = acquire(lock);
+  let locked = false;
   try {
     fs.mkdirSync(dir, { recursive: true });
+    locked = acquire(lock);
     const state = mergeState(loadState(file), base, now);
     // Only the rename is seen by another process, so a reader never gets half a file.
     const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
