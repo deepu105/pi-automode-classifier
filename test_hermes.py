@@ -218,6 +218,22 @@ class Wrapper(unittest.TestCase):
             self.assertIn(str(FIXTURE / name), locked)
         self.assertEqual(request["ownDirs"], [str(FIXTURE / "plugins")])
 
+    def test_the_request_names_the_session_and_its_state_folder(self):
+        request, _ = self.plugin._request("s-9", tool="terminal", args={"command": "ls"})
+        self.assertEqual(request["session"], "s-9")
+        self.assertEqual(request["sessions"], str(FIXTURE / "automode-classifier" / "sessions"))
+
+    def test_what_one_call_learns_is_there_for_the_next(self):
+        """Two calls are two node processes: what the first one downloaded is what the second judges."""
+        self.write_config({"decider": [], "rules": {"allow": ["curl *"]}})
+        downloaded = self.workspace / "downloaded.sh"
+        downloaded.write_text("#!/bin/sh\necho hi\n")
+        self.assertIsNone(self.ctx.guard("terminal", {"command": f"curl -o {downloaded} http://example.com/x.sh"}))
+        answer = self.ctx.guard("terminal", {"command": "./downloaded.sh"})
+        self.assertEqual(answer["action"], "approve")
+        self.assertIn("downloaded in this session", answer["message"])
+        self.assertTrue((FIXTURE / "automode-classifier" / "sessions" / "s1.json").is_file())
+
     def test_the_key_of_an_endpoint_comes_from_the_environment(self):
         self.write_config({"providers": {"pc": {"baseUrl": "http://x/v1", "apiKeyEnv": "AMC_TEST_KEY"}}})
         with patch_env({"AMC_TEST_KEY": " abc "}):

@@ -45,7 +45,7 @@ import { isStrings, loadConfig as loadCoreConfig } from "./core/config.ts";
 import { classifierProcessRunning, health, startServer, stopClassifierProcess } from "./core/classifier.ts";
 import { decideWithLlm, llmName, transcriptItems, type ChatRegistry } from "./core/llm.ts";
 import { appendLog } from "./core/util.ts";
-import { noUiText, promptClause, scoreBands, someRules, statusRow } from "./core/status.ts";
+import { noUiText, promptClause, scoreBands, sessionRow, someRules, statusRow } from "./core/status.ts";
 import { createGuard, type GuardSubject, type GuardSession } from "./core/guard.ts";
 
 // The pipeline moved to core/ so a second host can use it. These names still come from this file,
@@ -198,14 +198,13 @@ export default function (pi: ExtensionAPI, overrides: Partial<ReturnType<typeof 
     };
     const { deny, ask, classify: classified, allow } = status.rules;
     const yours = someRules([[deny, "deny"], [ask, "ask"], [classified, "classify"], [allow, "allow"], [status.allowedPaths.length, "allowed paths"]]) || "none";
-    const counts = status.counts;
     return [
       `Auto mode: ${status.enabled ? "on" : "OFF for this session   (turn on: /automode-classifier on)"}`,
       ...(configError ? [`Config error: ${home(configError)}`] : []),
       statusRow("1. Rules:", `${yours} (no UI: ${noUiText(config)}, ${promptClause(config)})`),
       ...(config.decider.length ? await Promise.all(config.decider.map(describe)) : [statusRow("2. Decider:", "none, classify verdicts ask you")]),
       "",
-      statusRow("Session:", `${counts.rule} allowed by rule, ${counts.model} by model, ${counts.asked} asked, ${counts.blocked} blocked${status.denials.total ? `, ${status.denials.total} LLM denials (${status.denials.consecutive} in a row)` : ""}`),
+      sessionRow(status),
       statusRow("Config:", `${home(CONFIG_FILE)}${fs.existsSync(CONFIG_FILE) ? "" : " (not present, defaults in use)"}`),
       statusRow("Log:", config.log ? home(LOG_FILE) : "off"),
     ].join("\n");

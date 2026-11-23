@@ -3,7 +3,7 @@
 // one small server stands in for a chat endpoint and a scorer. The commands under test are only
 // named, never run. Needs a Node that runs TypeScript directly (22.18 or newer).
 // Usage: node test-hermes.mjs
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -16,6 +16,7 @@ const { chatEndpoint } = await import("./core/openai.ts");
 const { chatFor, historyEntries, providerRegistry, statusText } = await import("./hermes/host.ts");
 const { loadConfig } = await import("./core/config.ts");
 const { createGuard } = await import("./core/guard.ts");
+const { mergeState } = await import("./core/session.ts");
 
 let failures = 0;
 const check = (label, got, want) => {
@@ -147,7 +148,26 @@ const ask = (request) => {
     return { action: `unreadable: ${line} ${proc.stderr.slice(0, 120)}` };
   }
 };
-const decide = (tool, input, extra = {}) => ask({ mode: "decide", config: configFile, example: path.join(repo, "config.example.jsonc"), log: logFile, guarded: [automode], ownDirs: [path.join(fixture, "plugins")], hasUI: true, tool, input, cwd: workspace, history: [{ role: "user", content: "do it" }], ...extra });
+const askAsync = (request) =>
+  new Promise((resolve) => {
+    // Not spawnSync: a test that serves a fake endpoint from this process has to keep its own event
+    // loop free, or the guard it spawns cannot reach that endpoint.
+    const proc = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", hook], { stdio: ["pipe", "pipe", "pipe"] });
+    let out = "";
+    proc.stdout.on("data", (chunk) => (out += chunk));
+    proc.on("close", () => {
+      const line = out.trim().split("\n").at(-1);
+      try {
+        resolve(JSON.parse(line));
+      } catch {
+        resolve({ action: `unreadable: ${line}` });
+      }
+    });
+    proc.stdin.end(JSON.stringify(request));
+  });
+const request = (tool, input, extra = {}) => ({ mode: "decide", config: configFile, example: path.join(repo, "config.example.jsonc"), log: logFile, guarded: [automode], ownDirs: [path.join(fixture, "plugins")], hasUI: true, tool, input, cwd: workspace, history: [{ role: "user", content: "do it" }], ...extra });
+const decide = (tool, input, extra = {}) => ask(request(tool, input, extra));
+const decideAsync = async (tool, input, extra = {}) => askAsync(request(tool, input, extra));
 const decisions = () => (fs.existsSync(logFile) ? fs.readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
 
 // The config key the wrapper needs
@@ -188,14 +208,78 @@ writeConfig({ decider: ["classifier", "llm"], classifier: { provider: "gone", mo
 const unreachable = decide("terminal", { command: "git push origin main" }, { providers: {} });
 ok("a model that is not set up does not let the call through", unreachable.action === "approve" || unreachable.action === "block", JSON.stringify(unreachable));
 
+// ---- What one call leaves for the next one ----
+// Each decision is its own process, so the session's state comes back from a file. The commands
+// below are only named, never run.
+const sessions = path.join(fixture, "automode-classifier", "sessions");
+const same = { session: "one-session", sessions };
+const stateOf = (id) => JSON.parse(fs.readFileSync(path.join(sessions, `${id}.json`), "utf8"));
+
+// A chat endpoint the guard can reach, so the chat decider really answers.
+let chatAnswer = "<block>no</block>";
+const chatServer = http.createServer((req, res) => {
+  req.on("data", () => undefined);
+  req.on("end", () => {
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ choices: [{ message: { content: chatAnswer }, finish_reason: "stop" }] }));
+  });
+});
+await new Promise((done) => chatServer.listen(0, "127.0.0.1", done));
+const chatProvider = { pc: { baseUrl: `http://127.0.0.1:${chatServer.address().port}/v1`, apiKey: "k" } };
+const llmConfig = (llm = {}) => ({ decider: ["llm"], llm: { provider: "pc", model: "m", twoStage: false, contextWindow: 131072, ...llm } });
+
+const downloaded = path.join(workspace, "downloaded.sh");
+fs.writeFileSync(downloaded, "#!/bin/sh\necho downloaded\n");
+writeConfig({ decider: [], rules: { allow: ["curl *"] } });
+check("a download your own rule allows runs", decide("terminal", { command: `curl -o ${downloaded} http://example.com/x.sh` }, same), { action: "allow" });
+check("the state file records the download", stateOf("one-session").files[downloaded], "fetched");
+check("and counts the call it decided", stateOf("one-session").counts.rule, 1);
+const runsDownload = decide("terminal", { command: "./downloaded.sh" }, same);
+ok("a later call that runs it asks, and says where it came from", runsDownload.action === "approve" && String(runsDownload.message).includes("downloaded in this session"), JSON.stringify(runsDownload));
+check("... and it is blocked where nobody can answer", decide("terminal", { command: "./downloaded.sh" }, { ...same, hasUI: false }).action, "block");
+const stranger = decide("terminal", { command: "./downloaded.sh" }, { ...same, session: "other-session" });
+ok("a session that did not download it sees only an unknown command", String(stranger.message).includes("unknown command"), JSON.stringify(stranger));
+
+const authored = path.join(workspace, "authored.sh");
+writeConfig(llmConfig());
+check("writing a script in an allowed folder runs", decide("write_file", { path: authored, content: "#!/bin/sh\necho a\n" }, { ...same, providers: chatProvider }), { action: "allow" });
+check("the state file records it as the session's own", stateOf("one-session").files[authored], "authored");
+const runsAuthored = await decideAsync("terminal", { command: "./authored.sh" }, { ...same, providers: chatProvider });
+const authoredLog = decisions().at(-1);
+ok("running what this session wrote goes to the chat decider", runsAuthored.action === "allow" && authoredLog.by === "llm" && String(authoredLog.reason).includes("which this session wrote"), `${JSON.stringify(runsAuthored)} ${JSON.stringify(authoredLog)}`);
+
+// The denial caps: after a run of them a person is asked instead of the agent being denied for ever.
+writeConfig(llmConfig({ maxTotalDenials: 2, maxConsecutiveDenials: 99 }));
+chatAnswer = "<block>yes</block><category>Test case</category><reason>named in the test</reason>";
+const capped = { session: "capped", sessions, providers: chatProvider };
+check("the first denial blocks", (await decideAsync("terminal", { command: "git push origin one" }, capped)).action, "block");
+check("the second reaches the cap, so a person is asked", (await decideAsync("terminal", { command: "git push origin two" }, capped)).action, "approve");
+check("the state file holds the denials", stateOf("capped").denials, { consecutive: 2, total: 2 });
+check("another session starts the count again", (await decideAsync("terminal", { command: "git push origin two" }, { ...capped, session: "uncapped" })).action, "block");
+writeConfig(llmConfig({ maxConsecutiveDenials: 1 }));
+check("a run of one denial is enough when that is the cap", (await decideAsync("terminal", { command: "git push origin three" }, { ...capped, session: "once" })).action, "approve");
+chatAnswer = "<block>no</block>";
+
+// A session nobody used for a week is gone.
+const stale = path.join(sessions, "stale-session.json");
+fs.writeFileSync(stale, "{}");
+const week = 8 * 24 * 60 * 60 * 1000;
+const longAgo = new Date(Date.now() - week);
+fs.utimesSync(stale, longAgo, longAgo);
+decide("terminal", { command: "ls" }, same);
+ok("a session idle for over a week is deleted", !fs.existsSync(stale));
+check("two parallel calls of one session add up instead of overwriting", mergeState({ files: { b: "fetched" }, counts: { rule: 1, model: 1, asked: 0, blocked: 0 }, denials: { consecutive: 1, total: 1 } }, { files: {}, counts: { rule: 1, model: 0, asked: 0, blocked: 0 }, denials: { consecutive: 0, total: 0 } }, { files: { a: "authored" }, counts: { rule: 2, model: 0, asked: 0, blocked: 0 }, denials: { consecutive: 1, total: 1 } }), { files: { b: "fetched", a: "authored" }, counts: { rule: 2, model: 1, asked: 0, blocked: 0 }, denials: { consecutive: 2, total: 2 } });
+await new Promise((done) => chatServer.close(done));
+
 // The status command
 writeConfig({ decider: ["classifier", "llm"], classifier: { provider: "pc", model: "lancet" }, llm: { provider: "pc", model: "flash", contextWindow: 131072 }, providers: { pc: { baseUrl: "http://x/v1", apiKeyEnv: "K" } } });
-const status = ask({ mode: "status", config: configFile, log: logFile, guarded: [automode], ownDirs: [], hasUI: true, providers: { pc: { baseUrl: "http://x/v1", apiKeyEnv: "K" } } });
+const status = ask({ mode: "status", config: configFile, log: logFile, guarded: [automode], ownDirs: [], hasUI: true, providers: { pc: { baseUrl: "http://x/v1", apiKeyEnv: "K" } }, session: "capped", sessions });
 const rows = String(status.text).split("\n");
 ok("status is on", rows[0] === "Auto mode: on", rows[0]);
 ok("status lists the scorer by endpoint and name", rows.some((r) => r.startsWith("2. Classifier:") && r.includes("pc/lancet, via Hermes") && r.includes("ask >=")), rows[1]);
 ok("status lists the chat model by endpoint and name", rows.some((r) => r.startsWith("3. LLM:") && r.includes("pc/flash, via Hermes") && r.includes("two-stage")), rows[2]);
 ok("status names the config and the log", rows.some((r) => r.includes("~/" + path.basename(fixture) + "/automode-classifier/config.json")) && rows.some((r) => r.includes("decisions.jsonl")), rows.join(" | "));
+ok("status shows the counts of this session", rows.some((r) => r.startsWith("Session:") && r.includes("allowed by rule") && r.includes("2 LLM denials (2 in a row)")), rows.join(" | "));
 fs.rmSync(configFile, { force: true });
 const missing = ask({ mode: "status", config: configFile, log: logFile, guarded: [], ownDirs: [], hasUI: true, providers: {} });
 ok("status says when the config file is not there", String(missing.text).includes("not present, defaults in use"), missing.text);

@@ -826,6 +826,8 @@ The same guard runs as a plugin for [Hermes](https://github.com/NousResearch/her
 
 Hermes runs Python and the guard is TypeScript, so `hermes/plugin.py` registers the `pre_tool_call`, `pre_llm_call` and `post_tool_call` hooks, and starts [`hermes/hook.ts`](hermes/hook.ts) with a Node that runs TypeScript, one process per call: a JSON request in, one answer out. The answer is allow, block, or escalate to Hermes' own approval gate. It fails closed. No Node, a late guard, junk from the guard, or an answer the wrapper does not know all go to the approval gate, and Hermes denies an approval nobody answers.
 
+Because each call is its own process, one session's state lives in a file: `<profile home>/automode-classifier/sessions/<session id>.json`. It holds what the session wrote and downloaded, the counts `status` prints, and the denial counts, and it is the same state Pi keeps in memory (`GuardState` in [`core/guard.ts`](core/guard.ts)). Two calls of one session can run at once, so a save merges the change each call made under a lock file. A session nobody used for 7 days is deleted.
+
 ### Install
 
 Clone the repo into the profile's plugin folder and enable it. A profile's home is `~/.hermes`, or `~/.hermes/profiles/<name>` for a named profile:
@@ -872,7 +874,8 @@ A profile that scores with LANCET and judges with a chat model on another machin
 | Pi's own files: `~/.pi/agent`, any `.pi` folder, `AGENTS.md` | the profile's `plugins/` folder, which asks like Pi's own files. `SOUL.md` and `config.yaml` are stricter, like `settings.json` |
 | `~/.pi/agent/extensions/pi-automode-classifier/config.json` | `<profile home>/automode-classifier/config.json` |
 | `~/.local/state/pi-automode-classifier/decisions.jsonl` | `<profile home>/automode-classifier/decisions.jsonl` |
-| `/automode-classifier status`, `on`, `off` | the same command, the same rows, minus the session counts: each call is a fresh process |
+| the guard's in-memory session (file origins, counts, denials) | `<profile home>/automode-classifier/sessions/<session id>.json`, because each call is a new process; deleted after 7 days idle |
+| `/automode-classifier status`, `on`, `off` | the same command, the same rows, the session counts included (they come from that session's state file) |
 | Stage 3 on the session's own model | an endpoint you name: `llm.provider` plus `providers`. Hermes hands a plugin no handle on the session's model |
 | Stage 2 through Pi's model registry | `classifier.provider` plus `providers`, or the local endpoint with `classifier.endpoint` and `startCommand`, which work the same in both |
 
@@ -883,8 +886,7 @@ Everything else under [Configuration](#configuration) reads the same here: your 
 - **The prompt's wider choices.** `Allow "git push *" for this session`, `Always allow changes in <folder>` and `Always allow …` are answered inside Pi's prompt and can be saved to your config. The gate in Hermes answers one call and remembers its own rules by a key this plugin gives it, and a `pre_tool_call` hook never learns what the person answered, so nothing wider is offered. Put those patterns in the profile's `rules.allow` and `allowedPaths` instead.
 - **`promptTimeoutMs`.** Hermes' approval gate has its own timeout; this one is not read.
 - **`llm.warmCache`.** It warms the Pi session's prefix cache at session start. Hermes has no session-start hook here to do it from, so the first decision pays the cold prefill.
-- **The session counts**, in `status`, and a decision log entry for what the person answered. An ask is logged as `"outcome": "ask"` with the rule and the reason that asked; allow and block are logged as in Pi.
-- **The denial caps.** `maxConsecutiveDenials` and `maxTotalDenials` count inside one process, and Hermes gives the guard a new one per call. Each block stands on its own, so a run of blocks never escalates on its own; Hermes' approval gate still decides each call by itself.
+- **A decision log entry for what the person answered.** A `pre_tool_call` hook never learns what the approval gate answered, so an ask is logged as `"outcome": "ask"` with the rule and the reason that asked; allow and block are logged as in Pi.
 - **The benches.** They drive Pi's handler.
 
 The transcript the chat decider reads is the messages Hermes gives a hook at the turn's start, plus the calls that finished in that turn. Tool output and the agent's own prose stay out of it, as in Pi, so a file the agent read cannot put instructions in front of the decider.

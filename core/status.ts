@@ -13,6 +13,10 @@ export const someRules = (pairs: [number, string][]) => pairs.filter(([n]) => n)
 export const scoreBands = (stage: { allowBelow: number; askAbove: number }, last: boolean) =>
   last || stage.allowBelow >= stage.askAbove ? `allow < ${stage.askAbove}, ask >= ${stage.askAbove}` : `allow < ${stage.allowBelow}, next ${stage.allowBelow}-${stage.askAbove}, ask >= ${stage.askAbove}`;
 
+// The session line: how the calls so far went. Both hosts print it from core/guard.ts's own counts.
+export const sessionRow = (status: { counts: { rule: number; model: number; asked: number; blocked: number }; denials: { consecutive: number; total: number } }) =>
+  statusRow("Session:", `${status.counts.rule} allowed by rule, ${status.counts.model} by model, ${status.counts.asked} asked, ${status.counts.blocked} blocked${status.denials.total ? `, ${status.denials.total} LLM denials (${status.denials.consecutive} in a row)` : ""}`);
+
 // What an ask means in a session nobody can answer.
 export const noUiText = (config: Config) => {
   const headless = config.withoutUi.rules;

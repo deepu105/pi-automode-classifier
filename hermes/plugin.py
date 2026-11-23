@@ -124,6 +124,10 @@ def _request(session_id: str, mode: str = "decide", tool: str = "", args: dict |
         "hasUI": approval_possible(session.get("platform", "")),
         "history": session.get("history", []),
         "providers": node_hook.resolve_providers(raw),
+        # The session, and where its state file lives: what it wrote and downloaded, its counts and
+        # its denials come back from here. See core/session.ts.
+        "session": session_id,
+        "sessions": str(home / "automode-classifier" / "sessions"),
         "tool": tool,
         "input": args or {},
         "cwd": _cwd(args or {}),

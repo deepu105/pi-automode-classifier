@@ -6,7 +6,8 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { loadConfig } from "../core/config.ts";
-import { createGuard, type Decision } from "../core/guard.ts";
+import { createGuard, emptyState, type Decision } from "../core/guard.ts";
+import { loadState, saveState, sessionFile } from "../core/session.ts";
 import { appendLog, clip } from "../core/util.ts";
 import { chatFor, providerRegistry, statusText, transcriptFor, type HookAnswer, type HookRequest } from "./host.ts";
 import { subject } from "./tools.ts";
@@ -26,13 +27,21 @@ function decisionAnswer(d: Decision): HookAnswer {
 async function run(request: HookRequest): Promise<HookAnswer> {
   const { config, error } = loadConfig(request.config, request.example);
   const providers = request.providers ?? {};
-  const guard = createGuard(config, {
-    product: "Hermes",
-    guarded: request.guarded ?? [],
-    ownDirs: request.ownDirs ?? [],
-    log: (entry) => appendLog(request.log, config.log, entry),
-    subject,
-  });
+  // The session's state from the calls before this one: what it wrote and downloaded, its counts,
+  // its denials. Without a session id each call stands on its own, as it did before.
+  const store = request.sessions && request.session ? sessionFile(request.sessions, request.session) : undefined;
+  const base = store ? loadState(store) : emptyState();
+  const guard = createGuard(
+    config,
+    {
+      product: "Hermes",
+      guarded: request.guarded ?? [],
+      ownDirs: request.ownDirs ?? [],
+      log: (entry) => appendLog(request.log, config.log, entry),
+      subject,
+    },
+    base,
+  );
   guard.notice = error;
   if (typeof request.enabled === "boolean") guard.setEnabled(request.enabled);
   if (request.mode === "status") return { action: "status", text: await statusText(config, guard, request) };
@@ -48,6 +57,7 @@ async function run(request: HookRequest): Promise<HookAnswer> {
       transcript: transcriptFor(request.history ?? [], config),
     },
   });
+  if (store) saveState(store, base, guard.state());
   // A prompt is the host's job here, so this is as far as the decision is logged: what the person
   // answered is not something a pre_tool_call hook gets back.
   if (decision.action === "ask") {

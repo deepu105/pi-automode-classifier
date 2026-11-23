@@ -9,7 +9,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { bashVerdict, commitWrites, compileRules, fileVerdict, isRootLike, makeScope, readVerdict, within, type Scope, type SessionFiles, type Verdict } from "../rules.ts";
+import { bashVerdict, commitWrites, compileRules, fileVerdict, isRootLike, makeScope, readVerdict, within, type Origin, type Scope, type SessionFiles, type Verdict } from "../rules.ts";
 import { denyMessage, type Outcome, type TranscriptItem } from "../automode.ts";
 import { classify, classifierContext, classifierName, type Registry } from "./classifier.ts";
 import { decideWithLlm, llmName, type ChatRegistry } from "./llm.ts";
@@ -79,6 +79,18 @@ export type Decision =
   // A prompt is needed and nobody here can show one: the host decides what asking means.
   | { action: "ask"; reason: string; tool: string; subject: string; key: string };
 
+// What one session carries from a call to the next: which files the session wrote or downloaded,
+// how the calls went, and how often the chat decider said no. A host that runs every decision in a
+// fresh process (Hermes) loads this before a decision and saves `state()` after it; a host that
+// keeps one process (Pi) leaves `initial` out and keeps it in memory. See core/session.ts.
+export interface GuardState {
+  files: Record<string, Origin>;
+  counts: GuardStatus["counts"];
+  denials: GuardStatus["denials"];
+}
+
+export const emptyState = (): GuardState => ({ files: {}, counts: { rule: 0, model: 0, asked: 0, blocked: 0 }, denials: { consecutive: 0, total: 0 } });
+
 export interface GuardStatus {
   enabled: boolean;
   counts: { rule: number; model: number; asked: number; blocked: number };
@@ -93,10 +105,12 @@ export interface Guard {
   notice?: string;
   evaluate(request: GuardRequest): Promise<Decision>;
   status(): GuardStatus;
+  /** The session as it stands now, for a host that saves it between calls. */
+  state(): GuardState;
   setEnabled(on: boolean): void;
 }
 
-export function createGuard(config: Config, host: GuardHost): Guard {
+export function createGuard(config: Config, host: GuardHost, initial?: GuardState): Guard {
   // The user's rules, plus the patterns saved with Always allow during this session. Without a
   // UI the withoutUi rules are added.
   const allowPatterns = [...config.rules.allow];
@@ -114,13 +128,14 @@ export function createGuard(config: Config, host: GuardHost): Guard {
   const allowedPaths = [...config.allowedPaths];
   const guarded = [...host.guarded, ...config.guardedPaths];
   let enabled = config.enabled;
-  const counts = { rule: 0, model: 0, asked: 0, blocked: 0 };
+  const fresh = emptyState();
+  const counts = { ...fresh.counts, ...(initial?.counts ?? {}) };
   // Denials by the chat decider, the backstop Claude Code has for a pushed-or-compromised agent.
-  const denials = { consecutive: 0, total: 0 };
+  const denials = { ...fresh.denials, ...(initial?.denials ?? {}) };
   // Exact commands and paths the user allowed for the rest of the session.
   const sessionAllowed = new Set<string>();
   // Files the session wrote or downloaded, as far as the rules saw it.
-  const files: SessionFiles = new Map();
+  const files: SessionFiles = new Map(Object.entries(initial?.files ?? {}) as [string, Origin][]);
   // Git checkouts per working directory, as they were when the session first used it. A worktree
   // added later counts only inside the folder that holds the main checkout, so `git worktree add`
   // cannot open an arbitrary folder.
@@ -136,6 +151,9 @@ export function createGuard(config: Config, host: GuardHost): Guard {
     },
     status() {
       return { enabled, counts, denials, rules: { deny: rules.ui.deny.length, ask: rules.ui.ask.length, classify: rules.ui.classify.length, allow: rules.ui.allow.length }, allowedPaths };
+    },
+    state() {
+      return { files: Object.fromEntries(files), counts: { ...counts }, denials: { ...denials } };
     },
     async evaluate(request) {
       const session = request.session;

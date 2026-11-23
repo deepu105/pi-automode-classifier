@@ -7,7 +7,7 @@ import type { Config } from "../core/config.ts";
 import type { Guard } from "../core/guard.ts";
 import { transcriptItems, type ChatRegistry, type Registry } from "../core/llm.ts";
 import { chatEndpoint, type ChatEndpoint } from "../core/openai.ts";
-import { noUiText, promptClause, scoreBands, someRules, statusRow } from "../core/status.ts";
+import { noUiText, promptClause, scoreBands, sessionRow, someRules, statusRow } from "../core/status.ts";
 
 // What one call carries from Hermes to this file. hermes/plugin.py builds it.
 export interface HookRequest {
@@ -28,6 +28,10 @@ export interface HookRequest {
   toolCallId?: string;
   // The session so far, in the OpenAI message form Hermes gives its hooks.
   history?: unknown[];
+  // This session, and the folder its state file lives in (see core/session.ts). Leave them out and
+  // every call starts with nothing: no file origins, no counts, no denial caps.
+  session?: string;
+  sessions?: string;
   // Endpoints by the name the config's providers give, with the key resolved from the profile.
   providers?: Record<string, ChatEndpoint>;
   // Set when this session chose `on` or `off` with the slash command: it beats the config's enabled.
@@ -99,9 +103,8 @@ export function chatFor(config: Config, providers: Record<string, ChatEndpoint>)
   return endpoint ? chatEndpoint(endpoint) : undefined;
 }
 
-// The status rows, in the same shape as Pi's `/automode-classifier status`. Two rows Pi has are
-// left out: the session counts (a fresh process knows nothing about the session) and the classifier
-// process check (a Hermes endpoint is not a process this plugin starts).
+// The status rows, in the same shape as Pi's `/automode-classifier status`. One row Pi has is left
+// out: the classifier process check (a Hermes endpoint is not a process this plugin starts).
 export async function statusText(config: Config, guard: Guard, request: HookRequest): Promise<string> {
   const status = guard.status();
   const { deny, ask, classify, allow } = status.rules;
@@ -129,6 +132,7 @@ export async function statusText(config: Config, guard: Guard, request: HookRequ
     statusRow("1. Rules:", `${yours} (no UI: ${noUiText(config)}, ${promptClause(config)})`),
     ...(config.decider.length ? await Promise.all(config.decider.map(describe)) : [statusRow("2. Decider:", "none, classify verdicts ask you")]),
     "",
+    sessionRow(guard.status()),
     statusRow("Config:", `${home(request.config)}${fs.existsSync(request.config) ? "" : " (not present, defaults in use)"}`),
     statusRow("Log:", config.log ? home(request.log) : "off"),
   ].join("\n");
