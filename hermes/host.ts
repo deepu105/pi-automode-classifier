@@ -7,7 +7,7 @@ import type { Config } from "../core/config.ts";
 import type { Guard } from "../core/guard.ts";
 import { decideWithLlm, transcriptItems, warmTranscript, type ChatRegistry, type Registry } from "../core/llm.ts";
 import { chatEndpoint, type ChatEndpoint } from "../core/openai.ts";
-import { noUiText, promptClause, scoreBands, sessionRow, someRules, statusRow } from "../core/status.ts";
+import { statusRows } from "../core/status.ts";
 
 // What one call carries from Hermes to this file. hermes/plugin.py builds it.
 export interface HookRequest {
@@ -129,36 +129,25 @@ export function chatFor(config: Config, providers: Record<string, ChatEndpoint>)
 // The status rows, in the same shape as Pi's `/automode-classifier status`. One row Pi has is left
 // out: the classifier process check (a Hermes endpoint is not a process this plugin starts).
 export async function statusText(config: Config, guard: Guard, request: HookRequest): Promise<string> {
-  const status = guard.status();
-  const { deny, ask, classify, allow } = status.rules;
-  const yours = someRules([[deny, "deny"], [ask, "ask"], [classify, "classify"], [allow, "allow"], [status.allowedPaths.length, "allowed paths"]]) || "none";
   // A name the config gives a provider: what it is called, and whether the host knows it.
   const named = (name: string, model: string) => `${name}/${model}${request.providers?.[name] ? ", via Hermes" : " (no provider of that name)"}`;
-  const describe = async (stage: string, i: number) => {
-    const label = `${i + 2}. ${stage === "llm" ? "LLM" : stage === "command" ? "Command" : "Classifier"}:`;
-    const last = i === config.decider.length - 1;
-    if (stage === "llm") {
-      const notes = [config.llm.twoStage ? "two-stage" : "one stage", `thinking:${config.llm.thinkingLevel}`];
-      if (config.llm.onBlock === "ask") notes.push("asks instead of blocking");
-      if (config.llm.onNoAnswer === "ask") notes.push("asks when it has no answer");
-      const name = config.llm.provider || config.llm.name;
-      return statusRow(label, `${name ? named(name, config.llm.model) : "(no model named)"} (${notes.join(", ")})`);
-    }
-    if (stage === "command") return statusRow(label, `${config.command.argv.join(" ")} (${scoreBands(config.command, last)})`);
-    const more = Object.keys(config.classifier.extraQuestions);
-    const where = config.classifier.provider ? named(config.classifier.provider, config.classifier.model) : `${config.classifier.endpoint}, ${(await health(config, 500)) ? "up" : "down"}`;
-    return statusRow(label, `${where} (${scoreBands(config.classifier, last)}${more.length ? `, extra: ${more.join(", ")}` : ""})`);
-  };
-  return [
-    `Auto mode: ${status.enabled ? "on" : "OFF for this session   (turn on: /automode-classifier on)"}`,
-    ...(guard.notice ? [`Config error: ${guard.notice}`] : []),
-    statusRow("1. Rules:", `${yours} (no UI: ${noUiText(config)}, ${promptClause(config)})`),
-    ...(config.decider.length ? await Promise.all(config.decider.map(describe)) : [statusRow("2. Decider:", "none, classify verdicts ask you")]),
-    "",
-    sessionRow(guard.status()),
-    statusRow("Config:", `${home(request.config)}${fs.existsSync(request.config) ? "" : " (not present, defaults in use)"}`),
-    statusRow("Log:", config.log ? home(request.log) : "off"),
-  ].join("\n");
+  const { classifier } = config;
+  // The endpoint is only probed when a step runs on it, so a status that does not use the scorer
+  // does not wait for one.
+  const scorer = config.decider.includes("classifier")
+    ? classifier.provider
+      ? named(classifier.provider, classifier.model)
+      : `${classifier.endpoint}, ${(await health(config, 500)) ? "up" : "down"}`
+    : "";
+  const name = config.llm.provider || config.llm.name;
+  return statusRows(config, guard.status(), {
+    notice: guard.notice ?? undefined,
+    llm: name ? named(name, config.llm.model) : "(no model named)",
+    command: config.command.argv.join(" "),
+    classifier: scorer,
+    config: `${home(request.config)}${fs.existsSync(request.config) ? "" : " (not present, defaults in use)"}`,
+    log: config.log ? home(request.log) : "off",
+  });
 }
 
 // One throwaway chat call, so the decider's fixed rule prompt sits in the endpoint's prefix cache

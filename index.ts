@@ -44,7 +44,7 @@ import { isStrings, loadConfig as loadCoreConfig } from "./core/config.ts";
 import { classifierProcessRunning, health, startServer, stopClassifierProcess } from "./core/classifier.ts";
 import { decideWithLlm, llmName, transcriptItems, warmTranscript, type ChatRegistry } from "./core/llm.ts";
 import { appendLog } from "./core/util.ts";
-import { noUiText, promptClause, scoreBands, sessionRow, someRules, statusRow } from "./core/status.ts";
+import { statusRows } from "./core/status.ts";
 import { createGuard, type GuardSubject, type GuardSession } from "./core/guard.ts";
 
 // The pipeline moved to core/ so a second host can use it. These names still come from this file,
@@ -181,32 +181,21 @@ export default function (pi: ExtensionAPI, overrides: Partial<ReturnType<typeof 
     const { llm, classifier, command } = config;
     const status = guard.status();
     const home = (text: string) => text.replaceAll(HOME, "~");
-    const describe = async (stage: string, i: number) => {
-      const label = `${i + 2}. ${stage === "llm" ? "LLM" : stage === "command" ? "Command" : "Classifier"}:`;
-      const last = i === config.decider.length - 1;
-      if (stage === "llm") {
-        const notes = [llm.twoStage ? "two-stage" : "one stage", `thinking:${llm.thinkingLevel}`];
-        if (llm.onBlock === "ask") notes.push("asks instead of blocking");
-        if (llm.onNoAnswer === "ask") notes.push("asks when it has no answer");
-        return statusRow(label, `${llmName(llm, ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined)}, via Pi (${notes.join(", ")})`);
-      }
-      if (stage === "command") return statusRow(label, `${home(command.argv.join(" "))}, ${classifierProcessRunning() ? "running" : "not running"} (${scoreBands(config[stage], last)})`);
-      const more = Object.keys(classifier.extraQuestions);
-      const where = classifier.provider ? `${classifier.provider}/${classifier.model}, via Pi` : `${classifier.endpoint}, ${(await health(config, 500)) ? "up" : "down"}`;
-      return statusRow(label, `${where} (${scoreBands(config[stage], last)}${more.length ? `, extra: ${more.join(", ")}` : ""})`);
-    };
-    const { deny, ask, classify: classified, allow } = status.rules;
-    const yours = someRules([[deny, "deny"], [ask, "ask"], [classified, "classify"], [allow, "allow"], [status.allowedPaths.length, "allowed paths"]]) || "none";
-    return [
-      `Auto mode: ${status.enabled ? "on" : "OFF for this session   (turn on: /automode-classifier on)"}`,
-      ...(configError ? [`Config error: ${home(configError)}`] : []),
-      statusRow("1. Rules:", `${yours} (no UI: ${noUiText(config)}, ${promptClause(config)})`),
-      ...(config.decider.length ? await Promise.all(config.decider.map(describe)) : [statusRow("2. Decider:", "none, classify verdicts ask you")]),
-      "",
-      sessionRow(status),
-      statusRow("Config:", `${home(CONFIG_FILE)}${fs.existsSync(CONFIG_FILE) ? "" : " (not present, defaults in use)"}`),
-      statusRow("Log:", config.log ? home(LOG_FILE) : "off"),
-    ].join("\n");
+    // The endpoint is only probed when a step actually runs on it, so a status that does not use the
+    // scorer does not wait for one.
+    const scorer = config.decider.includes("classifier")
+      ? classifier.provider
+        ? `${classifier.provider}/${classifier.model}, via Pi`
+        : `${classifier.endpoint}, ${(await health(config, 500)) ? "up" : "down"}`
+      : "";
+    return statusRows(config, status, {
+      notice: configError ? home(configError) : undefined,
+      llm: `${llmName(llm, ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined)}, via Pi`,
+      command: `${home(command.argv.join(" "))}, ${classifierProcessRunning() ? "running" : "not running"}`,
+      classifier: scorer,
+      config: `${home(CONFIG_FILE)}${fs.existsSync(CONFIG_FILE) ? "" : " (not present, defaults in use)"}`,
+      log: config.log ? home(LOG_FILE) : "off",
+    });
   };
 
   pi.registerCommand("automode-classifier", {

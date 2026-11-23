@@ -694,8 +694,6 @@ These go in the `llm` block. Every key is optional; what you leave out keeps its
 | `onBlock` | `"block"` | `block` denies and tells the agent to find a safer path. `ask` shows the confirm prompt. Without a UI a decider block is always a block, whatever `withoutUi.onAsk` says |
 | `maxConsecutiveDenials` | `3` | After this many denials in a row the human is asked instead (blocked without a UI) |
 | `maxTotalDenials` | `20` | ...and after this many in the session |
-
-`maxConsecutiveDenials` and `maxTotalDenials` count inside one process. In Hermes each call is its own process, so neither accumulates: see [What is not there in Hermes](#what-is-not-there-in-hermes).
 | `transcript.maxEntries` | `60` | Transcript lines kept. Tool lines are dropped before your messages, oldest first |
 | `transcript.maxChars` | `24000` | Size cap of the lines before the action, also shrunk to fit `contextWindow`. Tool lines go before your messages, oldest first. The action is never cut: one too long for the window is an error |
 | `transcript.toolInputChars` | `1200` | Cap per earlier tool call; file bodies are replaced by their size. The call under review is sent whole |
@@ -703,6 +701,8 @@ These go in the `llm` block. Every key is optional; what you leave out keeps its
 | `transcript.includeAssistantText` | `false` | Include the agent's own prose as quoted `Assistant:` lines, which the prompt says are not user intent. Claude Code strips it to keep it from talking itself into a block |
 | `transcript.includeToolResults` | `false` | Include tool output as quoted `Result <tool>:` lines. Off, hostile output cannot reach the decider |
 | `prompt.environment`, `prompt.hardDeny`, `prompt.softDeny`, `prompt.allow` | `["$defaults"]` | Rule lists of the prompt, as text. `"$defaults"` keeps the built-in list at that position; a list without it replaces that section |
+
+The two denial caps count one session. In Hermes each call is its own process, so the counts live in the session state file with everything else, and a session that ran into a cap stays there call after call.
 
 ### Chat decider configs
 
@@ -828,7 +828,7 @@ Hermes runs Python and the guard is TypeScript, so `hermes/plugin.py` registers 
 
 `llm.warmCache` works here too. The first hook of a session (`on_session_start`, or the first turn's `pre_llm_call` if that is what Hermes fires) starts one throwaway chat call in its own process and walks away, so the turn never waits for it. A marker file (`sessions/<session id>.warm`) makes it one call per session.
 
-Because each call is its own process, one session's state lives in a file: `<profile home>/automode-classifier/sessions/<session id>.json`. It holds what the session wrote and downloaded, the git checkouts the session started with, the outcome of each call the guard held back, the counts `status` prints, and the denial counts, and it is the same state Pi keeps in memory (`GuardState` in [`core/guard.ts`](core/guard.ts)). A save writes back only what its own call changed, so two calls of one session cannot undo each other's marks. A session nobody used for 7 days is deleted.
+Because each call is its own process, one session's state lives in a file: `<profile home>/automode-classifier/sessions/<session id>.json`. It holds what the session wrote and downloaded, the git checkouts the session started with, the outcome of each call the guard held back, the counts `status` prints, and the denial counts, and it is the same state Pi keeps in memory (`GuardState` in [`core/guard.ts`](core/guard.ts)). A save writes back only what its own call changed, so two calls of one session cannot undo each other's marks. A session nobody used for 7 days is deleted, and the half-written `.tmp` files of a call whose process died go with it.
 
 ### Install
 
@@ -884,7 +884,7 @@ Or run the installer a second time, which pulls the source, copies it into every
 | --- | --- |
 | The `bash`, `write`, `edit`, `read`, `grep` tools | `terminal` (with its own `workdir`) and `execute_code` as commands, and the text `process_manage` writes and submits; `write_file` and `patch` as file changes, every file a V4A patch names; `read_file` and `search_files` as reads; a `cronjob_manage` script as a command it runs later; `skill_manage` and `memory` as changes in the profile's own folders. [Every tool Hermes can use](#every-tool-hermes-can-use) has the whole list |
 | The confirm prompt | Hermes' approval gate. Its own timeout and approval rules decide what a repeat call costs |
-| Nobody to ask: print mode, most subagents | cron runs, kanban workers and programmatic platforms (`webhook`, `api_server`). `withoutUi.onAsk` decides there |
+| Nobody to ask: print mode, most subagents | cron runs, kanban workers, single-query runs (`hermes -z`, `hermes chat -q`) and programmatic platforms (`webhook`, `api_server`). `withoutUi.onAsk` decides there |
 | Pi's `settings.json` and this extension's files | the profile's `config.yaml`, `.env`, `SOUL.md`, `shell-hooks-allowlist.json`, the plugin folder and its config folder. Always ask, no rule opens them |
 | Pi's own files: `~/.pi/agent`, any `.pi` folder, `AGENTS.md` | the profile's `plugins/` folder, which asks like Pi's own files. `SOUL.md` and `config.yaml` are stricter, like `settings.json` |
 | `~/.pi/agent/extensions/pi-automode-classifier/config.json` | `<profile home>/automode-classifier/config.json` |
@@ -928,9 +928,14 @@ Anything a plugin or an MCP server registers is not in the map, and runs. Hermes
 - **A decision log entry for what the person answered.** A `pre_tool_call` hook never learns what the approval gate answered, so an ask is logged as `"outcome": "ask"` with the rule and the reason that asked; allow and block are logged as in Pi.
 - **The benches.** They drive Pi's handler.
 
-The transcript the chat decider reads is the messages Hermes gives a hook at the turn's start, plus the calls that finished in that turn. Tool output and the agent's own prose stay out of it, as in Pi, so a file the agent read cannot put instructions in front of the decider.
+The transcript the chat decider reads is the messages Hermes gives a hook at the turn's start, plus the calls that finished in that turn. Each call is read with how it ended: `ok`, `error`, or, for one this guard stopped, `blocked-by-permissions`. Hermes marks that inside the tool's own result, so a call that failed is not handed to the decider as a call that ran. Tool output and the agent's own prose stay out of it, as in Pi, so a file the agent read cannot put instructions in front of the decider.
 
 ### What it costs
+
+One decider is slower here than in Pi, because each call is its own process:
+
+- `command.argv` (LANCET or a similar scorer as a command) starts cold for every call. Pi keeps that process between calls and reuses it; a Hermes call has nothing to reuse. Set `command.timeoutMs` to what a cold start plus one answer really takes, or the call is judged as "no answer" and goes to the next step.
+- `classifier.startCommand` is throttled by a marker file (`<profile home>/automode-classifier/server-start`), so one attempt per 30 seconds holds across the calls of a session. Without it every call that found a local classifier endpoint down would start another copy of the server, and several copies would load at once.
 
 Stage 1 on its own costs about 85 ms per call on my machine, most of it Node starting, and stage 2 and 3 cost what they cost in Pi plus that start. `/automode-classifier status` adds a health probe of the classifier endpoint, half a second at most. `hermes plugins doctor`, `node test-hermes.mjs` and `python3 test_hermes.py` all run without a model or a server.
 
