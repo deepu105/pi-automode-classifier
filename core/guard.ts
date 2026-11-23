@@ -60,6 +60,9 @@ export interface GuardSession {
   registry?: Registry;
   // The model of the session, used when the config names none.
   sessionModel?: Record<string, unknown>;
+  // The id the host routes per-conversation provider calls with, such as Pi's session id. None
+  // when the host has no such notion, or when its provider does not need one.
+  sessionId?: string;
   // The session as the deciders see it, with the call under review last.
   transcript(pending: { tool: string; input: unknown; id?: string; files?: Record<string, string> } | undefined, decided: ReadonlyMap<string, Outcome>): TranscriptItem[];
   // A confirm prompt, when `hasUI`. Without it an ask goes back to the caller unresolved.
@@ -267,7 +270,7 @@ export function createGuard(config: Config, host: GuardHost, initial?: GuardStat
         const actionFiles = verdict.files?.length ? fileContents(verdict.files) : undefined;
         const items = session.transcript({ tool: request.tool, input, id: request.toolCallId, files: actionFiles }, decided);
         const sessionModel = session.sessionModel;
-        const decision = await decideWithLlm(config, items, request.signal, session.chat, sessionModel);
+        const decision = await decideWithLlm(config, items, request.signal, session.chat, sessionModel, session.sessionId);
         Object.assign(entry, {
           model: llmName(llm, sessionModel ? `${sessionModel.provider}/${sessionModel.id}` : undefined),
           llm: { stage: "stage" in decision ? decision.stage : undefined, tokens: "tokens" in decision ? decision.tokens : undefined },

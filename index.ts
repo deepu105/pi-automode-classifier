@@ -125,6 +125,7 @@ export default function (pi: ExtensionAPI, overrides: Partial<ReturnType<typeof 
       chat: registry as ChatRegistry | undefined,
       registry: registry as GuardSession["registry"],
       sessionModel: ctx.model as unknown as Record<string, unknown> | undefined,
+      sessionId: ctx.sessionManager?.getSessionId?.(),
       transcript: (pending, decided) => transcriptItems(branch, config.llm, pending, decided),
       // Only where there is a UI: Pi showed these notes when a person could see them, and a
       // headless session has nowhere to put one.
@@ -161,7 +162,7 @@ export default function (pi: ExtensionAPI, overrides: Partial<ReturnType<typeof 
     // With the chat decider the fixed rule prompt is some 25k tokens, and a cold prefill costs
     // the first real call tens of seconds. One throwaway call fills the prefix cache instead.
     if (guard.status().enabled && config.decider.includes("llm") && config.llm.warmCache) {
-      void decideWithLlm(config, warmTranscript("bash"), undefined, ctx.modelRegistry as unknown as ChatRegistry, ctx.model as unknown as Record<string, unknown>).catch(() => undefined);
+      void decideWithLlm(config, warmTranscript("bash"), undefined, ctx.modelRegistry as unknown as ChatRegistry, ctx.model as unknown as Record<string, unknown>, ctx.sessionManager?.getSessionId?.()).catch(() => undefined);
     }
   });
   pi.on("session_shutdown", async () => stopClassifierProcess());

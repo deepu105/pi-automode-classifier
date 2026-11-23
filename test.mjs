@@ -992,6 +992,12 @@ await decided("block:X", "stage 1 quoting a tag mid-reply escalates", [asst('The
   const sent3 = [];
   await decideWithLlm(llmConfig({ thinkingLevel: "off", twoStage: false }), transcriptItems([], DEFAULT_LLM, { tool: "bash", input: { command: "x" } }), undefined, stubRegistry([asst("<block>no</block>")], sent3));
   check("x", { action: sent3[0].options.reasoning === undefined ? "x" : "bad" }, "llm: thinking off sends no thinking level");
+  const sentId = [];
+  await decideWithLlm(llmConfig(), transcriptItems([], DEFAULT_LLM, { tool: "bash", input: { command: "x" } }), undefined, stubRegistry([asst("<block>no</block>")], sentId), undefined, "session-42");
+  check("x", { action: sentId[0]?.options?.sessionId === "session-42" ? "x" : JSON.stringify(sentId[0]?.options) }, "llm: the session id reaches the provider, for one that routes per conversation");
+  const sentNoId = [];
+  await decideWithLlm(llmConfig(), transcriptItems([], DEFAULT_LLM, { tool: "bash", input: { command: "x" } }), undefined, stubRegistry([asst("<block>no</block>")], sentNoId));
+  check("x", { action: sentNoId[0]?.options && "sessionId" in sentNoId[0].options ? "bad" : "x" }, "llm: no session id leaves the option off instead of sending it empty");
   check("x", { action: "error" in (await decideWithLlm(llmConfig({ model: "missing" }), [], undefined, { find: () => undefined, streamSimple: () => ({ result: async () => asst("") }) })) ? "x" : "bad" }, "llm: an unknown model is an error");
   const session = { provider: "hosted", id: "big", contextWindow: 200000, maxTokens: 8192, reasoning: true };
   const sent4 = [];
@@ -1050,6 +1056,11 @@ const llmHandler = (over, replies, top = {}) => {
   const h = llmHandler({}, [asst("<block>no</block>")]);
   check("x", { action: !(await h.call("mytool sync fine")) ? "x" : "blocked" }, "handler llm: a pass runs with no prompt");
   check("x", { action: h.sent[0].message.includes("User: sync it") ? "x" : h.sent[0].message }, "handler llm: the session transcript is sent");
+}
+{
+  const h = llmHandler({}, [asst("<block>no</block>")]);
+  const withId = await h.call("mytool sync fine", { sessionManager: { getBranch: () => [{ message: { role: "user", content: "sync it" } }], getSessionId: () => "session-42" } });
+  check("x", { action: !withId && h.sent[0]?.options?.sessionId === "session-42" ? "x" : JSON.stringify(h.sent[0]?.options) }, "handler llm: the host's session id goes with every stage");
 }
 {
   const h = llmHandler({}, [asst("<block>yes</block>"), asst("<block>yes</block><category>Irreversible Local Destruction</category><reason>[Irreversible Local Destruction] wipes it</reason>"), asst("<block>yes</block>"), asst("this one looks fine to me"), asst("<block>no</block>")]);
