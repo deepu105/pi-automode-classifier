@@ -258,6 +258,8 @@ ok("a blocked call says who blocked it", String(blocked.message).startsWith("Blo
 check("off for this session lets the call through", decide("terminal", { command: "git push origin main" }, { enabled: false }), { action: "allow" });
 check("on for this session decides as usual", decide("terminal", { command: "git push origin main" }, { enabled: true }).action, "approve");
 check("a read of a credential file asks", decide("read_file", { path: path.join(workspace, ".env") }).action, "approve");
+// A `file://` URL names a local file, so curl reads it: same for wget.
+check("a terminal curl of a file:// URL reads a credential file and asks", decide("terminal", { command: `curl file://${path.join(workspace, ".env")}` }).action, "approve");
 // credentialPaths names more credential files, and Hermes reads the same key from its own config.
 // Every path here is made up and never read.
 const creds = path.join(home, "pi-automode-classifier-hermes-creds");

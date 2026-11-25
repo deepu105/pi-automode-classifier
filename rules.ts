@@ -380,11 +380,56 @@ function credentialInWord(word: string, scope: Scope): string | undefined {
   return undefined;
 }
 
+// A `file://` URL names a local file, so `curl file:///home/u/.ssh/id_rsa` reads it. `localhost`
+// is allowed and `%20`-style escapes stand for the characters a URL cannot carry. Any other
+// scheme names something remote, so it stays text.
+const FILE_URL_PREFIX = /^file:\/\/(?:localhost)?(?=\/)/i;
+const URL_SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
+const percentDecode = (s: string) => s.replace(/%([0-9a-fA-F]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+function fileUrlPath(word: string): string | undefined {
+  return FILE_URL_PREFIX.test(word) ? percentDecode(word.replace(FILE_URL_PREFIX, "")) : undefined;
+}
+
+// The whole word is one path under a credentialPaths entry, with a space in it: the parser joins
+// `cat "/home/u/my creds/token.dat"` into a single word. Text that only mentions a path, such as
+// `git commit -m "notes moved out of ~/work/vaults"`, is not one.
+function isSpacedPath(word: string, scope: Scope): boolean {
+  if (!scope.credentials.length) return false;
+  const p = resolveWord(word, scope);
+  return !!p && scope.credentials.some((c) => within(p, c));
+}
+
+// The word that holds code an interpreter runs inline: `python -c CODE`, `node -e CODE`,
+// `deno eval CODE`. A shell `-c` string is not here: the rules parse it command by command.
+// Kept short on purpose; add an interpreter here when its inline code needs the same check.
+const INLINE_CODE: Record<string, string[]> = {
+  python: ["-c"],
+  python3: ["-c"],
+  node: ["-e", "--eval", "-p"],
+  perl: ["-e", "-E"],
+  ruby: ["-e"],
+  php: ["-r"],
+  deno: ["eval"],
+  bun: ["-e"],
+};
+function inlineCodeWords(name: string, args: string[]): Set<string> {
+  const flags = INLINE_CODE[name];
+  if (!flags) return new Set();
+  const i = args.findIndex((a) => flags.includes(a));
+  return new Set(i < 0 ? [] : [args[i + 1] ?? ""]);
+}
+
 // The credential file a shell word names, if any. Handles `--file=path`, curl's `@file` and
-// git's `rev:path`. In a command, words with spaces and URLs are text, not built-in paths; a
-// credentialPaths entry still counts when it appears inside such a word.
-function secretIn(word: string, scope: Scope, isPath = false): string | undefined {
-  if (!isPath && (/\s/.test(word) || /^[a-z][a-z0-9+.-]*:\/\//i.test(word))) return credentialInWord(word, scope);
+// git's `rev:path`. In a command, a word with spaces and a URL other than `file://` are text, not
+// built-in paths. A credentialPaths entry inside such a word counts only for a word that is one
+// spaced path under an entry, or for code an interpreter runs: text that only names an entry does
+// not ask.
+function secretIn(word: string, scope: Scope, isPath = false, inline = false): string | undefined {
+  const target = fileUrlPath(word);
+  if (target !== undefined) return secretIn(target, scope, true, inline);
+  const spacedText = !isPath && /\s/.test(word) && !inline && !isSpacedPath(word, scope);
+  if (spacedText) return undefined;
+  if (!isPath && URL_SCHEME.test(word)) return credentialInWord(word, scope);
   const text = word.replace(/^[^=/]*=/, "").replace(/^@/, "");
   for (const candidate of new Set([text, text.slice(text.lastIndexOf(":") + 1)])) {
     if (!candidate || candidate.startsWith("-")) continue;
@@ -418,8 +463,9 @@ function credentialRead(name: string, args: string[], cmd: Simple, scope: Scope)
   // command does, including the ones that only name their own operands: `tee out < ~/.ssh/id_rsa`.
   // shortcut: a here-string (`echo <<< path`) lands in the same list and asks too, which costs a
   // prompt and nothing more; separate the two lists if that ever matters.
+  const code = inlineCodeWords(name, args);
   for (const word of [...words, ...(cmd.in ?? [])]) {
-    const secret = secretIn(word, scope);
+    const secret = secretIn(word, scope, false, code.has(word));
     if (secret) return secret;
   }
   return undefined;
@@ -488,7 +534,8 @@ export function parse(command: string, depth = 0): Parsed {
   const pushCmd = () => {
     pushWord();
     redirect = "";
-    if (cur.argv.length || cur.out.length) result.cmds.push(cur);
+    // A command with only an input redirect still reads that file: `echo $(< ~/.ssh/id_rsa)`.
+    if (cur.argv.length || cur.out.length || cur.in?.length) result.cmds.push(cur);
     cur = { argv: [], out: [] };
   };
   // Parses a substitution body as extra commands.
@@ -1063,9 +1110,9 @@ function command(cmd: Simple, scope: Scope, depth: number): Verdict {
   if (["export", "declare", "typeset", "readonly"].includes(argv[0])) assigned.push(...argv.slice(1));
   const loader = assigned.map((w) => LOADS_CODE.exec(w)).find((m) => m && (m[1] !== "NODE_OPTIONS" || NODE_LOADS.test(m[2])));
   if (loader) verdict = classify(`sets ${loader[1]}, which loads other code into the program`);
-  if (!argv.length) return verdict;
 
-  const name = path.basename(argv[0]);
+  // An input redirect with no program to run, such as the `$(< file)` inside `F=$(< file)`.
+  const name = argv.length ? path.basename(argv[0]) : "";
   const args = argv.slice(1);
 
   if (["case", "function", "select", "source", ".", "trap", "alias"].includes(name)) return worst(verdict, classify(`shell ${name}`));
@@ -1076,7 +1123,8 @@ function command(cmd: Simple, scope: Scope, depth: number): Verdict {
     verdict = worst(verdict, guardAsk(`${name} touches the auto-mode guard's own files`));
   }
   const secret = credentialRead(name, args, cmd, scope);
-  if (secret) verdict = worst(verdict, criticalAsk(`${name} reads a credential file: ${secret}`));
+  if (secret) verdict = worst(verdict, criticalAsk(`${name || "An input redirect"} reads a credential file: ${secret}`));
+  if (!argv.length) return verdict;
   // Pi's package commands change its settings and what code every session loads.
   if (name === "pi" && ["install", "remove", "uninstall", "update", "config"].includes(args[0])) verdict = worst(verdict, piAsk(`pi ${args[0]} changes Pi's own setup`));
   // A program in a temp directory, or one this session wrote or downloaded, is not the tool its

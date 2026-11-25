@@ -449,6 +449,12 @@ for (const command of [
   "base64 < ~/.ssh/id_rsa",
   "tee /tmp/out < ~/.aws/credentials",
   "tee /tmp/out < .env",
+  // A `file://` URL names a local file, and `$(< file)` reads one with no command in front of it.
+  `curl file://${home}/.ssh/id_rsa`,
+  `wget file://${home}/.ssh/id_rsa`,
+  "curl file:///home/dev/keys/my%20keys/id_rsa",
+  "echo $(< ~/.ssh/id_rsa)",
+  "F=$(< ~/.ssh/id_rsa); echo $F",
   "timeout 5 cat ~/.netrc",
   "cp ~/.ssh/id_rsa /tmp/key-copy",
   "tar czf /tmp/keys.tgz ~/.gnupg",
@@ -476,6 +482,8 @@ for (const command of [
   "git commit -m 'document ~/.aws/credentials setup'",
   "docker build --env-file .env -t app .",
   "curl -s https://example.com/api/secrets.json",
+  "curl -s https://example.com/id_rsa",
+  "echo 'remember the ~/.aws/credentials backup'",
 ]) {
   bash("allow", command);
 }
@@ -518,6 +526,7 @@ check("allow", bashVerdict("cat ~/.npmrc", scope(project, { rules: compileRules(
   // one word, or a path inside inline code. A built-in credential path matches in both places.
   const spaced = path.join(home, "pi-automode-classifier-test my creds");
   const spacedEntry = "~/pi-automode-classifier-test my creds";
+  const spacedURL = spaced.replace(/ /g, "%20");
   const vaults = `${creds}/vaults`;
   check("ask", bashVerdict(`cat "${spaced}/token.dat"`, credScope([spacedEntry])), "credentialPaths: a quoted path with a space in the entry");
   check("ask", bashVerdict(`cat ~/pi-automode-classifier-test\\ my\\ creds/token.dat`, credScope([spacedEntry])), "credentialPaths: a path with a space written with backslashes");
@@ -530,6 +539,9 @@ check("allow", bashVerdict("cat ~/.npmrc", scope(project, { rules: compileRules(
   check("ask", bashVerdict(`tee /tmp/out < $'${vaults}/token.dat'`, credScope([vaults])), "credentialPaths: a $'...' quoted path after an input redirect");
   check("ask", bashVerdict(`cat $"${vaults}/token.dat"`, credScope([vaults])), "credentialPaths: a $\"...\" quoted path");
   check("ask", bashVerdict(`curl file://${vaults}/token.dat`, credScope([vaults])), "credentialPaths: a file:// URL");
+  check("ask", bashVerdict(`curl file://localhost/${vaults}/x`, credScope([vaults])), "credentialPaths: a file:// URL written with localhost");
+  check("ask", bashVerdict(`curl file://${spacedURL}/x`, credScope([spacedEntry])), "credentialPaths: a file:// URL with %20 for the space in an entry");
+  check("allow", bashVerdict(`curl -s https://example.com/${vaults}/x`, credScope([vaults])), "credentialPaths: another URL scheme stays text");
   check("allow", bashVerdict(`cat $'${creds}/vaults2/token.dat'`, credScope([vaults])), "credentialPaths: a $'...' quoted longer sibling name");
   check("ask", bashVerdict(`python -c "print(open('$HOME/pi-automode-classifier-test-creds/token.dat').read())"`, credScope([creds])), "credentialPaths: a $HOME path inside inline code");
   check("ask", read("read", "$HOME/pi-automode-classifier-test-creds/token.dat", [creds]), "credentialPaths: a $HOME path for the read tool");
@@ -541,6 +553,22 @@ check("allow", bashVerdict("cat ~/.npmrc", scope(project, { rules: compileRules(
   // Naming a path without reading it stays allowed, as it is for a built-in credential file.
   check("allow", bashVerdict(`ls ${vaults}/x`, credScope([vaults])), "credentialPaths: ls names a path under an entry");
   check("allow", bashVerdict(`ls "${spaced}/x"`, credScope([spacedEntry])), "credentialPaths: ls names a spaced path");
+  // Text that only mentions an entry reads nothing: a commit message, a notification, and the
+  // commands inside a shell -c string. notify-send is an unknown command, so it goes to the
+  // decider instead of asking for the entry.
+  check("allow", bashVerdict(`git commit -m "notes moved out of ${vaults}"`, credScope([vaults])), "credentialPaths: an entry only mentioned in a commit message");
+  check("allow", bashVerdict(`git commit -m "notes moved out of ~/pi-automode-classifier-test-creds/vaults"`, credScope([vaults])), "credentialPaths: an entry only mentioned in a commit message, written with ~");
+  check("classify", bashVerdict(`notify-send "backup of ${vaults} done"`, credScope([vaults])), "credentialPaths: an entry only mentioned in a notification");
+  check("allow", bashVerdict(`bash -c "ls -la ${vaults}"`, credScope([vaults])), "credentialPaths: a shell -c string that only names an entry");
+  check("ask", bashVerdict(`bash -c "cat ${vaults}/x"`, credScope([vaults])), "credentialPaths: a shell -c string that reads an entry");
+  // Inline code counts whatever the spaces in it are, because the interpreter runs the whole word.
+  check("ask", bashVerdict(`python3 -c "p = '${vaults}/x'; print(p)"`, credScope([vaults])), "credentialPaths: inline code with spaces in it");
+  check("ask", bashVerdict(`node -e "const p = '${vaults}/x'; console.log(p)"`, credScope([vaults])), "credentialPaths: inline node code with spaces in it");
+  // `$(< file)` hands the file out with no command in front of it, so it reads it on its own.
+  check("ask", bashVerdict(`echo $(< ${vaults}/x)`, credScope([vaults])), "credentialPaths: $(< file) with no command reads the file");
+  check("ask", bashVerdict(`F=$(< ${vaults}/x); echo $F`, credScope([vaults])), "credentialPaths: an assignment from $(< file) reads the file");
+  check("ask", bashVerdict(`echo $(< "${spaced}/x")`, credScope([spacedEntry])), "credentialPaths: $(< file) on a spaced path");
+  check("allow", bashVerdict(`echo $(< ${path.join(project, "notes.txt")})`, credScope([vaults])), "credentialPaths: $(< file) on another path runs");
   // A symlink matches on what it points at, in the entry or in the path read.
   const vault = path.join(home, "pi-automode-classifier-test-vault");
   const link = `${vault}-link`;
