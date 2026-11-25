@@ -270,6 +270,7 @@ check("a command that reads a credentialPaths file asks", decide("terminal", { c
 check("a command that reads a credentialPaths file by redirect asks", decide("terminal", { command: `tee /tmp/out < ${path.join(creds, "auth-blob.dat")}` }).action, "approve");
 check("a command that reads a built-in credential file by redirect asks", decide("terminal", { command: `tee /tmp/out < ${path.join(workspace, ".env")}` }).action, "approve");
 check("a path under no credentialPaths entry runs", decide("read_file", { path: path.join(creds, "notes.txt") }), { action: "allow" });
+check("code that opens a credentialPaths file asks", decide("terminal", { command: `python -c "print(open('${path.join(creds, "vaults/token.dat")}').read())"` }).action, "approve");
 // The ask for a credentialPaths read is firm: it stays a block with no UI even when withoutUi
 // says to allow what needs a prompt.
 writeConfig({ decider: [], credentialPaths: [path.join(creds, "vaults")], withoutUi: { onAsk: "allow" } });

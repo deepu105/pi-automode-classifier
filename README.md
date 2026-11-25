@@ -141,7 +141,8 @@ A command that reads a credential file asks, also a read-only one like `cat ~/.a
 - **Places**, in any home directory, including `.ssh`, `.aws`, `.gnupg`, `.kube`, `.azure`, `.oci`, `.config/gcloud`, `.docker/config.json`, `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, keyrings and keychains, shell history, and `/etc/shadow`.
 - **File names**, anywhere: `.env` and `.env.production`, `id_rsa` and the other private key names, `*.pem`, `*.key`, `*.p12`, `*.jks`, `*.kdbx`, `secrets.yaml`, `credentials.json`, and service account JSON files.
 - **Not asked**: commands that only name the file (`ls`, `stat`, `test -f`, `chmod`), writing one (`cp .env.example .env`, `sed -i`, `>> .env`), `--env-file .env`, public keys, `known_hosts`, `~/.ssh/config`, `~/.aws/config`, certificates and `.env.example`.
-- **A redirect reads too**: `< file` hands the file to the command, so `tee /tmp/out < ~/.ssh/id_rsa` asks like `cat` does.
+- **A redirect reads too**: `< file` hands the file to the command, so `tee /tmp/out < ~/.ssh/id_rsa` asks like `cat` does. A here-string (`<<<`) of a listed path asks too.
+- **Known limits, for built-in paths and `credentialPaths` alike**: a search that starts in a parent folder is not caught, for example `grep -r x ~`. A `credentialPaths` entry of `/` makes every read ask.
 - **Your own paths**: `credentialPaths` in your config adds files and directories, for example `"~/work/vaults"`. An entry is an absolute path or starts with `~/`, and a directory entry covers everything under it.
 
 An `allow` rule in your config replaces the ask, for example `"cat ~/.npmrc"`.

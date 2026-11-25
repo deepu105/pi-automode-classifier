@@ -337,17 +337,60 @@ function isSecretPath(p: string): boolean {
 // `~` is expanded and a symlink resolves to its target.
 const isUserCredential = (p: string, scope: Scope) => scope.credentials.some((c) => within(p, c));
 
+// What can start or end a path inside a longer word: a quote, an assignment, a separator of a
+// list or of a script, or space. A built-in path needs none, because its regexes match anywhere
+// in a word; a credentialPaths entry needs one on both sides, so `/a/vaults` does not match
+// `/a/vaults2/x` or `/a/vaults.bak`.
+const EDGE_CHARS = "\\s\"'`=(:,@";
+const PATH_EDGE = `[${EDGE_CHARS}]`;
+const IN_PATH = `[^${EDGE_CHARS}]`;
+
+// One pattern per text form a credentialPaths entry takes inside a word: its absolute path (and
+// its symlink target, which withTargets adds), plus the forms the shell expands for an entry
+// under $HOME. The tail after the entry is part of the path, so the reason can show it.
+const credentialFormsCache = new Map<string, RegExp[]>();
+function credentialForms(entry: string): RegExp[] {
+  let forms = credentialFormsCache.get(entry);
+  if (!forms) {
+    const base = entry.replace(/\/+$/, "") || entry;
+    const texts = [base];
+    if (base.startsWith(HOME + "/")) {
+      const rest = base.slice(HOME.length + 1);
+      texts.push(`~/${rest}`, `$HOME/${rest}`, `\${HOME}/${rest}`);
+    }
+    forms = texts.map((text) => {
+      const body = text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return new RegExp(`(?:^|${PATH_EDGE})(${body}(?:/${IN_PATH}*)?)(?:$|/|${PATH_EDGE})`);
+    });
+    credentialFormsCache.set(entry, forms);
+  }
+  return forms;
+}
+
+// The credentialPaths path a word names inside itself, whatever spaces or text surround it: a
+// path with a space the parser joined into one word, or a path inside inline code.
+function credentialInWord(word: string, scope: Scope): string | undefined {
+  for (const entry of scope.credentials) {
+    for (const form of credentialForms(entry)) {
+      const hit = form.exec(word)?.[1];
+      if (hit) return hit;
+    }
+  }
+  return undefined;
+}
+
 // The credential file a shell word names, if any. Handles `--file=path`, curl's `@file` and
-// git's `rev:path`. In a command, words with spaces and URLs are text, not paths.
+// git's `rev:path`. In a command, words with spaces and URLs are text, not built-in paths; a
+// credentialPaths entry still counts when it appears inside such a word.
 function secretIn(word: string, scope: Scope, isPath = false): string | undefined {
-  if (!isPath && (/\s/.test(word) || /^[a-z][a-z0-9+.-]*:\/\//i.test(word))) return undefined;
+  if (!isPath && (/\s/.test(word) || /^[a-z][a-z0-9+.-]*:\/\//i.test(word))) return credentialInWord(word, scope);
   const text = word.replace(/^[^=/]*=/, "").replace(/^@/, "");
   for (const candidate of new Set([text, text.slice(text.lastIndexOf(":") + 1)])) {
     if (!candidate || candidate.startsWith("-")) continue;
     const p = resolveWord(candidate, scope);
     if (isSecretPath(expandHome(candidate)) || (p && (isSecretPath(p) || isUserCredential(p, scope)))) return candidate;
   }
-  return undefined;
+  return credentialInWord(word, scope);
 }
 
 // Commands that name a path without showing what is in it.

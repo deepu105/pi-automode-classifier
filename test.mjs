@@ -514,6 +514,27 @@ check("allow", bashVerdict("cat ~/.npmrc", scope(project, { rules: compileRules(
   check("allow", bashVerdict(`cat ${blob}2`, credScope([blob])), "credentialPaths: a file entry does not match a longer file name");
   check("ask", bashVerdict(`cat ${creds}/vaults/t.dat`, credScope([`${creds}/vaults/`])), "credentialPaths: a trailing slash on an entry still covers the files under it");
   check("ask", bashVerdict(`cat ${creds}/not-made-yet/token.dat`, credScope([`${creds}/not-made-yet`])), "credentialPaths: an entry that does not exist yet covers what goes under it");
+  // An entry also counts inside a longer word: a path with a space, which the parser joins into
+  // one word, or a path inside inline code. A built-in credential path matches in both places.
+  const spaced = path.join(home, "pi-automode-classifier-test my creds");
+  const spacedEntry = "~/pi-automode-classifier-test my creds";
+  const vaults = `${creds}/vaults`;
+  check("ask", bashVerdict(`cat "${spaced}/token.dat"`, credScope([spacedEntry])), "credentialPaths: a quoted path with a space in the entry");
+  check("ask", bashVerdict(`cat ~/pi-automode-classifier-test\\ my\\ creds/token.dat`, credScope([spacedEntry])), "credentialPaths: a path with a space written with backslashes");
+  check("ask", bashVerdict(`python -c "print(open('${vaults}/token.dat').read())"`, credScope([vaults])), "credentialPaths: an entry inside inline python");
+  check("ask", bashVerdict(`node -e "require('fs').readFileSync('${vaults}/token.dat')"`, credScope([vaults])), "credentialPaths: an entry inside inline node code");
+  check("ask", bashVerdict(`sh -c "cat '${vaults}/x'"`, credScope([vaults])), "credentialPaths: an entry inside a shell -c string");
+  check("ask", bashVerdict(`python -c "print(open('~/pi-automode-classifier-test-creds/token.dat').read())"`, credScope([creds])), "credentialPaths: a ~/ path inside inline code");
+  check("ask", bashVerdict(`python -c "print(open('$HOME/pi-automode-classifier-test-creds/token.dat').read())"`, credScope([creds])), "credentialPaths: a $HOME path inside inline code");
+  check("ask", read("read", "$HOME/pi-automode-classifier-test-creds/token.dat", [creds]), "credentialPaths: a $HOME path for the read tool");
+  // A match needs a path boundary on both sides, so a longer name is not the entry.
+  check("classify", bashVerdict(`python -c "print(open('${creds}/vaults2/x').read())"`, credScope([vaults])), "credentialPaths: inline code with a longer sibling folder name");
+  check("classify", bashVerdict(`python -c "print(open('${creds}/vaults.bak/x').read())"`, credScope([vaults])), "credentialPaths: inline code with a name that continues the entry");
+  check("classify", bashVerdict(`python -c "print(open('${blob}2').read())"`, credScope([blob])), "credentialPaths: inline code with a longer file name");
+  check("allow", bashVerdict(`sh -c "cat '${spaced}2/x'"`, credScope([spacedEntry])), "credentialPaths: a spaced entry does not match a longer name");
+  // Naming a path without reading it stays allowed, as it is for a built-in credential file.
+  check("allow", bashVerdict(`ls ${vaults}/x`, credScope([vaults])), "credentialPaths: ls names a path under an entry");
+  check("allow", bashVerdict(`ls "${spaced}/x"`, credScope([spacedEntry])), "credentialPaths: ls names a spaced path");
   // A symlink matches on what it points at, in the entry or in the path read.
   const vault = path.join(home, "pi-automode-classifier-test-vault");
   const link = `${vault}-link`;
