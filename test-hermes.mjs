@@ -258,6 +258,19 @@ ok("a blocked call says who blocked it", String(blocked.message).startsWith("Blo
 check("off for this session lets the call through", decide("terminal", { command: "git push origin main" }, { enabled: false }), { action: "allow" });
 check("on for this session decides as usual", decide("terminal", { command: "git push origin main" }, { enabled: true }).action, "approve");
 check("a read of a credential file asks", decide("read_file", { path: path.join(workspace, ".env") }).action, "approve");
+// credentialPaths names more credential files, and Hermes reads the same key from its own config.
+// Every path here is made up and never read.
+const creds = path.join(home, "pi-automode-classifier-hermes-creds");
+writeConfig({ decider: [], credentialPaths: [path.join(creds, "auth-blob.dat"), path.join(creds, "vaults"), "~/pi-automode-classifier-hermes-vaults"] });
+check("credentialPaths is read from the config", loadConfig(configFile).config.credentialPaths, [path.join(creds, "auth-blob.dat"), path.join(creds, "vaults"), "~/pi-automode-classifier-hermes-vaults"]);
+check("a read of a credentialPaths file asks", decide("read_file", { path: path.join(creds, "auth-blob.dat") }).action, "approve");
+check("a credentialPaths entry written with ~ asks", decide("read_file", { path: "~/pi-automode-classifier-hermes-vaults/token.dat" }).action, "approve");
+check("a credentialPaths folder covers what is under it", decide("search_files", { path: path.join(creds, "vaults/token.dat") }).action, "approve");
+check("a command that reads a credentialPaths file asks", decide("terminal", { command: `cat ${path.join(creds, "auth-blob.dat")}` }).action, "approve");
+check("a path under no credentialPaths entry runs", decide("read_file", { path: path.join(creds, "notes.txt") }), { action: "allow" });
+writeConfig({ decider: [], credentialPaths: ["~/vaults", 7] });
+ok("a credentialPaths entry that is not text rejects the config", Boolean(loadConfig(configFile).error), loadConfig(configFile).error);
+writeConfig({ decider: [] });
 // `workdir` is the model's own: it must not turn that folder into the project, where every write
 // in it would run by rule.
 fs.mkdirSync(outside, { recursive: true });

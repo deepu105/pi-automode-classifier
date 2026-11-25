@@ -9,7 +9,7 @@ import path from "node:path";
 
 // Keeps the handler tests away from the real config file.
 process.env.PI_CODING_AGENT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "pi-automode-classifier-test-"));
-const { bashVerdict, compileRules, fileVerdict, makeScope } = await import("./rules.ts");
+const { bashVerdict, compileRules, fileVerdict, makeScope, readVerdict } = await import("./rules.ts");
 
 const home = os.homedir();
 // Does not need to exist. It must not be under a temp directory, which the rules treat as scratch space.
@@ -259,6 +259,7 @@ check("x", { action: merged.classifier.askAbove === 0.3 && merged.rules.deny.len
   check("x", { action: JSON.stringify(keys(JSON.parse(example))) === JSON.stringify(keys(DEFAULTS)) && JSON.stringify(loaded) === JSON.stringify(DEFAULTS) ? "x" : "differs" }, "config: config.example.jsonc has every key, at its default");
 }
 loads("unknown key", { extraAsk: ["x"] }, true);
+loads("credentialPaths with a key that is not text", { credentialPaths: ["~/vaults", 7] }, true);
 loads("unknown rules key", { rules: { permit: ["x"] } }, true);
 loads("a key named like an Object method", { toString: 1 }, true);
 loads("a nested key named like an Object method", { llm: { constructor: {} } }, true);
@@ -472,6 +473,38 @@ for (const command of [
 check("ask", bashVerdict("cat ~/.npmrc", scope()), "credentials: cat ~/.npmrc without a user rule");
 check("allow", bashVerdict("cat ~/.npmrc", scope(project, { rules: compileRules({ allow: ["cat ~/.npmrc"] }) })), "credentials: a user allow rule replaces the ask");
 
+// credentialPaths names more credential files. An entry is an absolute path or `~/`, and a
+// directory covers everything under it. Every path here is made up and holds nothing real.
+{
+  const creds = path.join(home, "pi-automode-classifier-test-creds");
+  const file = path.join(creds, "auth-blob.dat");
+  const under = path.join(creds, "nested/token.dat");
+  const credScope = (entries, options = {}) => makeScope(project, [guard, settings], { ...options, credentialPaths: entries });
+  // A read the rules do not otherwise check comes back undefined, so it shows as "allow".
+  const read = (tool, target, entries) => readVerdict(tool, target, credScope(entries)) ?? { action: "allow" };
+  check("ask", bashVerdict(`cat ${file}`, credScope([file])), "credentialPaths: a file entry");
+  check("ask", bashVerdict("cat ~/pi-automode-classifier-test-creds/auth-blob.dat", credScope(["~/pi-automode-classifier-test-creds/auth-blob.dat"])), "credentialPaths: a ~ entry");
+  check("ask", bashVerdict(`cat ${under}`, credScope([creds])), "credentialPaths: a directory entry covers a file under it");
+  check("allow", bashVerdict(`cat ${under}`, credScope([file])), "credentialPaths: a file under no entry runs");
+  check("allow", bashVerdict(`cat ${path.join(project, "notes.dat")}`, credScope([file])), "credentialPaths: another path runs");
+  check("allow", bashVerdict(`ls -la ${file}`, credScope([file])), "credentialPaths: naming one without reading it runs");
+  check("allow", bashVerdict(`cat ${file}`, credScope([file], { rules: compileRules({ allow: [`cat ${file}`] }) })), "credentialPaths: a user allow rule replaces the ask");
+  check("ask", read("read", file, [file]), "credentialPaths: the read tool on a file entry");
+  check("ask", read("grep", path.join(creds, "nested"), [creds]), "credentialPaths: the grep tool in a directory entry");
+  check("allow", read("read", under, [file]), "credentialPaths: the read tool on a path under no entry");
+  // A symlink matches on what it points at, in the entry or in the path read.
+  const vault = path.join(home, "pi-automode-classifier-test-vault");
+  const link = `${vault}-link`;
+  fs.mkdirSync(vault, { recursive: true });
+  fs.writeFileSync(path.join(vault, "token.dat"), "not a key");
+  fs.rmSync(link, { force: true });
+  fs.symlinkSync(vault, link);
+  check("ask", bashVerdict(`cat ${path.join(link, "token.dat")}`, credScope([vault])), "credentialPaths: a read through a symlink to a folder entry");
+  check("ask", bashVerdict(`cat ${path.join(link, "token.dat")}`, credScope([link])), "credentialPaths: a folder entry that is a symlink");
+  fs.rmSync(link, { force: true });
+  fs.rmSync(vault, { recursive: true, force: true });
+}
+
 // The allow pattern a prompt can offer for a command the rules do not know.
 const pattern = (want, command) => {
   const got = bashVerdict(command, scope()).pattern;
@@ -573,7 +606,7 @@ fs.rmSync(linked, { recursive: true });
 const handlers = {};
 extension(
   { on: (name, handler) => (handlers[name] = handler), registerCommand: () => {} },
-  { log: false, decider: ["classifier"], rules: { ...DEFAULTS.rules, ask: ["niri msg output *"], allow: ["git push origin *"] }, guardedPaths: ["~/guarded-by-config"] },
+  { log: false, decider: ["classifier"], rules: { ...DEFAULTS.rules, ask: ["niri msg output *"], allow: ["git push origin *"] }, guardedPaths: ["~/guarded-by-config"], credentialPaths: ["~/pi-amc-handler-creds"] },
 );
 const answers = [];
 const offered = [];
@@ -603,6 +636,10 @@ await handle("block", "read tool on a credential file", "read", { path: "~/.aws/
 await handle("block", "read tool on a key in a folder with spaces", "read", { path: "~/My Keys/id_rsa" }, false);
 await handle("run", "read tool on a public key", "read", { path: "~/.ssh/id_ed25519.pub" }, false);
 await handle("block", "grep tool in a credential folder", "grep", { pattern: "PRIVATE", path: "~/.ssh" }, false);
+await handle("block", "read tool on a credentialPaths file", "read", { path: "~/pi-amc-handler-creds/token.dat" }, false);
+await handle("block", "grep tool in a credentialPaths folder", "grep", { pattern: "token", path: "~/pi-amc-handler-creds" }, false);
+await handle("block", "a credentialPaths read is blocked without a UI", "bash", { command: "cat ~/pi-amc-handler-creds/token.dat" }, false);
+await handle("run", "a read outside credentialPaths runs", "read", { path: "~/pi-amc-handler-other/token.dat" }, false);
 await handle("run", "grep tool elsewhere", "grep", { pattern: "TODO", path: "src" }, false);
 await handle("block", "rm -rf / is denied", "bash", { command: "rm -rf /" }, true);
 await handle("block", "git push without a UI", "bash", { command: "git push" }, false);

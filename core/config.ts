@@ -70,6 +70,9 @@ export interface Config {
   // More files or directories that count as the guard's own (changes to them always ask),
   // for example the server's unit file. `~` is expanded.
   guardedPaths: string[];
+  // More files or directories that count as credential files, so a read of one always asks.
+  // `~` is expanded; a directory entry covers everything under it.
+  credentialPaths: string[];
   // A confirm prompt nobody answers counts as a Block after this long, so an unattended session
   // does not stop there forever. 0 waits forever.
   promptTimeoutMs: number;
@@ -103,6 +106,7 @@ export const DEFAULTS: Config = {
   rules: { deny: [], ask: [], classify: [], allow: [] },
   allowedPaths: [],
   guardedPaths: [],
+  credentialPaths: [],
   promptTimeoutMs: 60_000,
   withoutUi: { onAsk: "block", rules: { allow: [], deny: [] } },
   decider: ["llm"],
@@ -163,6 +167,7 @@ const SCHEMA: Schema = {
   rules: { deny: isStrings, ask: isStrings, classify: isStrings, allow: isStrings },
   allowedPaths: isStrings,
   guardedPaths: isStrings,
+  credentialPaths: isStrings,
   promptTimeoutMs: isTimeoutOrOff,
   withoutUi: { onAsk: oneOf("block", "allow"), rules: { allow: isStrings, deny: isStrings } },
   decider: (v) => isStrings(v) && (v as string[]).every((d) => ["llm", "classifier", "command"].includes(d)) && new Set(v as string[]).size === (v as string[]).length,

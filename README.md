@@ -141,6 +141,7 @@ A command that reads a credential file asks, also a read-only one like `cat ~/.a
 - **Places**, in any home directory, including `.ssh`, `.aws`, `.gnupg`, `.kube`, `.azure`, `.oci`, `.config/gcloud`, `.docker/config.json`, `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, keyrings and keychains, shell history, and `/etc/shadow`.
 - **File names**, anywhere: `.env` and `.env.production`, `id_rsa` and the other private key names, `*.pem`, `*.key`, `*.p12`, `*.jks`, `*.kdbx`, `secrets.yaml`, `credentials.json`, and service account JSON files.
 - **Not asked**: commands that only name the file (`ls`, `stat`, `test -f`, `chmod`), writing one (`cp .env.example .env`, `sed -i`, `>> .env`), `--env-file .env`, public keys, `known_hosts`, `~/.ssh/config`, `~/.aws/config`, certificates and `.env.example`.
+- **Your own paths**: `credentialPaths` in your config adds files and directories, for example `"~/work/vaults"`, and a directory entry covers everything under it.
 
 An `allow` rule in your config replaces the ask, for example `"cat ~/.npmrc"`.
 
@@ -774,6 +775,7 @@ Optional, in `~/.pi/agent/extensions/pi-automode-classifier/config.json`. A conf
 | `rules` | all empty | Your own `deny`, `ask`, `classify` and `allow` patterns |
 | `allowedPaths` | `[]` | More directories where file changes are allowed, like the project directory |
 | `guardedPaths` | `[]` | More paths that count as the guard's own files, so changes to them always ask |
+| `credentialPaths` | `[]` | More files or directories that count as credential files, so a read of one always asks |
 | `promptTimeoutMs` | `60000` | A confirm prompt nobody answers is treated as a `Block` after this long, so an unattended session doesn't wait there forever. `0` waits forever | Pi only: Hermes' approval gate has its own timeout |
 | `withoutUi.onAsk` | `"block"` | What to do with a call that needs a prompt when there is no UI: `block` or `allow`. Root, credential reads, downloaded code and this extension's own files are blocked either way, unless one of your rules matches |
 | `withoutUi.rules` | empty `allow` and `deny` | Patterns added to `rules` when there is no UI. A `deny` here wins over an `allow` in `rules` |
@@ -894,7 +896,7 @@ Or run the installer a second time, which pulls the source, copies it into every
 | Stage 3 on the session's own model | an endpoint you name: `llm.provider` plus `providers`. Hermes hands a plugin no handle on the session's model |
 | Stage 2 through Pi's model registry | `classifier.provider` plus `providers`, or the local endpoint with `classifier.endpoint` and `startCommand`, which work the same in both |
 
-Everything else under [Configuration](#configuration) reads the same here: your own rule patterns, `allowedPaths`, `guardedPaths`, `withoutUi.rules`, the classifier questions and `classifier.contextChars`, `command.argv` for a classifier that runs as a process, the `llm.prompt` rule lists, and `onBlock` and `onNoAnswer`. [Stage 1: rules](#stage-1-rules), [What asks you](#what-asks-you), [Scripts and programs](#scripts-and-programs) and [Credential files](#credential-files) all apply: they are the same code, and `Hermes` is the product name in their reasons.
+Everything else under [Configuration](#configuration) reads the same here: your own rule patterns, `allowedPaths`, `guardedPaths`, `credentialPaths`, `withoutUi.rules`, the classifier questions and `classifier.contextChars`, `command.argv` for a classifier that runs as a process, the `llm.prompt` rule lists, and `onBlock` and `onNoAnswer`. [Stage 1: rules](#stage-1-rules), [What asks you](#what-asks-you), [Scripts and programs](#scripts-and-programs) and [Credential files](#credential-files) all apply: they are the same code, and `Hermes` is the product name in their reasons.
 
 ### Every tool Hermes can use
 

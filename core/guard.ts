@@ -139,6 +139,7 @@ export function createGuard(config: Config, host: GuardHost, initial?: GuardStat
   let rules = compile();
   const allowedPaths = [...config.allowedPaths];
   const guarded = [...host.guarded, ...config.guardedPaths];
+  const credentials = [...config.credentialPaths];
   let enabled = config.enabled;
   const fresh = emptyState();
   const counts = { ...fresh.counts, ...(initial?.counts ?? {}) };
@@ -185,6 +186,7 @@ export function createGuard(config: Config, host: GuardHost, initial?: GuardStat
         piDirs: host.ownDirs,
         product: host.product,
         allowedPaths: [...allowedPaths, ...roots],
+        credentialPaths: credentials,
         files,
         project: (p) => inCheckout(p, roots),
         chatDecider: config.decider.includes("llm"),

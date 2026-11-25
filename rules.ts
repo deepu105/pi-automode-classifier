@@ -117,6 +117,9 @@ export interface Scope {
   product: string;
   // Extra directories where file changes are allowed, like the project root.
   allowed: string[];
+  // Files and directories the config added to credentialPaths: a read of one asks like a
+  // built-in credential file. A directory entry covers everything under it.
+  credentials: string[];
   rules?: UserRules;
   // Patterns allowed for the session in a prompt. Unlike your own rules they never replace a
   // firm ask: root, a credential read or downloaded code still asks.
@@ -142,6 +145,7 @@ const withTargets = (paths: string[]) => [...new Set(paths.map(expandHome).flatM
 
 export interface ScopeOptions {
   allowedPaths?: string[];
+  credentialPaths?: string[];
   piDirs?: string[];
   product?: string;
   rules?: UserRules;
@@ -160,6 +164,7 @@ export function makeScope(cwd: string, guarded: string[], options: ScopeOptions 
     piDirs: withTargets(options.piDirs ?? []),
     product: options.product ?? "Pi",
     allowed: withTargets(options.allowedPaths ?? []),
+    credentials: withTargets(options.credentialPaths ?? []),
     rules: options.rules,
     picked: options.picked,
     files: options.files ?? new Map(),
@@ -328,6 +333,10 @@ function isSecretPath(p: string): boolean {
   return SECRET_PLACES.some((place) => place.test(p)) || SECRET_NAMES.test(name);
 }
 
+// A path under one of the credentialPaths the config added. Entries come from withTargets, so
+// `~` is expanded and a symlink resolves to its target.
+const isUserCredential = (p: string, scope: Scope) => scope.credentials.some((c) => within(p, c));
+
 // The credential file a shell word names, if any. Handles `--file=path`, curl's `@file` and
 // git's `rev:path`. In a command, words with spaces and URLs are text, not paths.
 function secretIn(word: string, scope: Scope, isPath = false): string | undefined {
@@ -336,7 +345,7 @@ function secretIn(word: string, scope: Scope, isPath = false): string | undefine
   for (const candidate of new Set([text, text.slice(text.lastIndexOf(":") + 1)])) {
     if (!candidate || candidate.startsWith("-")) continue;
     const p = resolveWord(candidate, scope);
-    if (isSecretPath(expandHome(candidate)) || (p && isSecretPath(p))) return candidate;
+    if (isSecretPath(expandHome(candidate)) || (p && (isSecretPath(p) || isUserCredential(p, scope)))) return candidate;
   }
   return undefined;
 }
