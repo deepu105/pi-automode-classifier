@@ -429,7 +429,8 @@ function secretIn(word: string, scope: Scope, isPath = false, inline = false): s
   if (target !== undefined) return secretIn(target, scope, true, inline);
   const spacedText = !isPath && /\s/.test(word) && !inline && !isSpacedPath(word, scope);
   if (spacedText) return undefined;
-  if (!isPath && URL_SCHEME.test(word)) return credentialInWord(word, scope);
+  // Any scheme but file:// (handled above) names something remote: a path in its query is sent, not read.
+  if (!isPath && URL_SCHEME.test(word)) return undefined;
   const text = word.replace(/^[^=/]*=/, "").replace(/^@/, "");
   for (const candidate of new Set([text, text.slice(text.lastIndexOf(":") + 1)])) {
     if (!candidate || candidate.startsWith("-")) continue;

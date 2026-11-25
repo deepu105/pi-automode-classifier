@@ -542,6 +542,8 @@ check("allow", bashVerdict("cat ~/.npmrc", scope(project, { rules: compileRules(
   check("ask", bashVerdict(`curl file://localhost/${vaults}/x`, credScope([vaults])), "credentialPaths: a file:// URL written with localhost");
   check("ask", bashVerdict(`curl file://${spacedURL}/x`, credScope([spacedEntry])), "credentialPaths: a file:// URL with %20 for the space in an entry");
   check("allow", bashVerdict(`curl -s https://example.com/${vaults}/x`, credScope([vaults])), "credentialPaths: another URL scheme stays text");
+  check("allow", bashVerdict(`curl -s "https://example.com/api?file=${vaults}/token.dat"`, credScope([vaults])), "credentialPaths: a listed path in a URL query is sent, not read");
+  check("allow", bashVerdict(`wget "https://example.com/dl?a=1&path=${vaults}/token.dat"`, credScope([vaults])), "credentialPaths: a listed path after & in a URL query");
   check("allow", bashVerdict(`cat $'${creds}/vaults2/token.dat'`, credScope([vaults])), "credentialPaths: a $'...' quoted longer sibling name");
   check("ask", bashVerdict(`python -c "print(open('$HOME/pi-automode-classifier-test-creds/token.dat').read())"`, credScope([creds])), "credentialPaths: a $HOME path inside inline code");
   check("ask", read("read", "$HOME/pi-automode-classifier-test-creds/token.dat", [creds]), "credentialPaths: a $HOME path for the read tool");
