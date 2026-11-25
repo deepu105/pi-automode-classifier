@@ -338,10 +338,11 @@ function isSecretPath(p: string): boolean {
 const isUserCredential = (p: string, scope: Scope) => scope.credentials.some((c) => within(p, c));
 
 // What can start or end a path inside a longer word: a quote, an assignment, a separator of a
-// list or of a script, or space. A built-in path needs none, because its regexes match anywhere
-// in a word; a credentialPaths entry needs one on both sides, so `/a/vaults` does not match
-// `/a/vaults2/x` or `/a/vaults.bak`.
-const EDGE_CHARS = "\\s\"'`=(:,@";
+// list or of a script, shell expansion text (`$'...'` leaves a `$` once the quotes are gone,
+// `${...}`), or space. A built-in path needs none, because its regexes match anywhere in a word;
+// a credentialPaths entry needs one on both sides, so `/a/vaults` does not match `/a/vaults2/x`
+// or `/a/vaults.bak`. A `file://` prefix also starts a path.
+const EDGE_CHARS = "\\s\"'`=(:,@${}";
 const PATH_EDGE = `[${EDGE_CHARS}]`;
 const IN_PATH = `[^${EDGE_CHARS}]`;
 
@@ -360,7 +361,7 @@ function credentialForms(entry: string): RegExp[] {
     }
     forms = texts.map((text) => {
       const body = text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      return new RegExp(`(?:^|${PATH_EDGE})(${body}(?:/${IN_PATH}*)?)(?:$|/|${PATH_EDGE})`);
+      return new RegExp(`(?:^|${PATH_EDGE}|file://)(${body}(?:/${IN_PATH}*)?)(?:$|/|${PATH_EDGE})`);
     });
     credentialFormsCache.set(entry, forms);
   }

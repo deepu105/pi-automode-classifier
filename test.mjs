@@ -525,6 +525,12 @@ check("allow", bashVerdict("cat ~/.npmrc", scope(project, { rules: compileRules(
   check("ask", bashVerdict(`node -e "require('fs').readFileSync('${vaults}/token.dat')"`, credScope([vaults])), "credentialPaths: an entry inside inline node code");
   check("ask", bashVerdict(`sh -c "cat '${vaults}/x'"`, credScope([vaults])), "credentialPaths: an entry inside a shell -c string");
   check("ask", bashVerdict(`python -c "print(open('~/pi-automode-classifier-test-creds/token.dat').read())"`, credScope([creds])), "credentialPaths: a ~/ path inside inline code");
+  // Shell quoting and URL forms: a built-in path asks in each of them, so an entry must too.
+  check("ask", bashVerdict(`cat $'${vaults}/token.dat'`, credScope([vaults])), "credentialPaths: a $'...' quoted path");
+  check("ask", bashVerdict(`tee /tmp/out < $'${vaults}/token.dat'`, credScope([vaults])), "credentialPaths: a $'...' quoted path after an input redirect");
+  check("ask", bashVerdict(`cat $"${vaults}/token.dat"`, credScope([vaults])), "credentialPaths: a $\"...\" quoted path");
+  check("ask", bashVerdict(`curl file://${vaults}/token.dat`, credScope([vaults])), "credentialPaths: a file:// URL");
+  check("allow", bashVerdict(`cat $'${creds}/vaults2/token.dat'`, credScope([vaults])), "credentialPaths: a $'...' quoted longer sibling name");
   check("ask", bashVerdict(`python -c "print(open('$HOME/pi-automode-classifier-test-creds/token.dat').read())"`, credScope([creds])), "credentialPaths: a $HOME path inside inline code");
   check("ask", read("read", "$HOME/pi-automode-classifier-test-creds/token.dat", [creds]), "credentialPaths: a $HOME path for the read tool");
   // A match needs a path boundary on both sides, so a longer name is not the entry.
