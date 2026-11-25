@@ -360,14 +360,20 @@ const PATTERN_FIRST = new Set(["grep", "egrep", "fgrep", "rg", "ag", "ack", "sed
 
 // The credential file a simple command would read, if any.
 function credentialRead(name: string, args: string[], cmd: Simple, scope: Scope): string | undefined {
-  if (NAMES_ONLY.has(name)) return undefined;
   // An in-place edit shows nothing, and a destination is written, not read.
-  if (name === "sed" && args.some((a) => /^(-i|--in-place)/.test(a) || /^-[a-zA-Z]*i/.test(a))) return undefined;
-  let words = args;
-  if (PATTERN_FIRST.has(name)) words = operands(args).slice(1);
-  else if (COPIERS.has(name)) words = operands(args).slice(0, -1);
-  // `--env-file .env` hands the file to a program and shows nothing.
-  words = words.filter((w, i) => !/^--env-file(=|$)/.test(w) && words[i - 1] !== "--env-file");
+  const inPlace = name === "sed" && args.some((a) => /^(-i|--in-place)/.test(a) || /^-[a-zA-Z]*i/.test(a));
+  let words: string[] = [];
+  if (!NAMES_ONLY.has(name) && !inPlace) {
+    words = args;
+    if (PATTERN_FIRST.has(name)) words = operands(args).slice(1);
+    else if (COPIERS.has(name)) words = operands(args).slice(0, -1);
+    // `--env-file .env` hands the file to a program and shows nothing.
+    words = words.filter((w, i) => !/^--env-file(=|$)/.test(w) && words[i - 1] !== "--env-file");
+  }
+  // An input redirect hands the file's content to the command, so `< file` reads it whatever the
+  // command does, including the ones that only name their own operands: `tee out < ~/.ssh/id_rsa`.
+  // shortcut: a here-string (`echo <<< path`) lands in the same list and asks too, which costs a
+  // prompt and nothing more; separate the two lists if that ever matters.
   for (const word of [...words, ...(cmd.in ?? [])]) {
     const secret = secretIn(word, scope);
     if (secret) return secret;

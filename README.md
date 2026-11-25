@@ -141,7 +141,8 @@ A command that reads a credential file asks, also a read-only one like `cat ~/.a
 - **Places**, in any home directory, including `.ssh`, `.aws`, `.gnupg`, `.kube`, `.azure`, `.oci`, `.config/gcloud`, `.docker/config.json`, `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, keyrings and keychains, shell history, and `/etc/shadow`.
 - **File names**, anywhere: `.env` and `.env.production`, `id_rsa` and the other private key names, `*.pem`, `*.key`, `*.p12`, `*.jks`, `*.kdbx`, `secrets.yaml`, `credentials.json`, and service account JSON files.
 - **Not asked**: commands that only name the file (`ls`, `stat`, `test -f`, `chmod`), writing one (`cp .env.example .env`, `sed -i`, `>> .env`), `--env-file .env`, public keys, `known_hosts`, `~/.ssh/config`, `~/.aws/config`, certificates and `.env.example`.
-- **Your own paths**: `credentialPaths` in your config adds files and directories, for example `"~/work/vaults"`, and a directory entry covers everything under it.
+- **A redirect reads too**: `< file` hands the file to the command, so `tee /tmp/out < ~/.ssh/id_rsa` asks like `cat` does.
+- **Your own paths**: `credentialPaths` in your config adds files and directories, for example `"~/work/vaults"`. An entry is an absolute path or starts with `~/`, and a directory entry covers everything under it.
 
 An `allow` rule in your config replaces the ask, for example `"cat ~/.npmrc"`.
 
@@ -452,7 +453,7 @@ These are the setups I tested. Each one has the `config.json` and the server def
 | `contextChars` | How much of the session the classifier is told about, in characters: the user's own message and the calls before this one, as the chat decider sees them. 0 (the default) tells it the command alone |
 | `contextIn` | `state`: the session goes beside the command as its own `context` key, which Jev and llama.cpp's server read. `command`: it is folded into the command text, the only way a server that reads that one field, like [LANCET's](#run-lancet-as-a-server), can see it |
 
-The other keys (`enabled`, `withoutUi`, `log`, `rules`, `allowedPaths`, `guardedPaths`) work the same with every model, so the samples leave them out.
+The other keys (`enabled`, `withoutUi`, `log`, `rules`, `allowedPaths`, `guardedPaths`, `credentialPaths`) work the same with every model, so the samples leave them out.
 
 The `startCommand` lines use LlamaStash. For the systemd unit use `["systemctl", "--user", "start", "pi-automode-classifier.service"]` and put the `llama-server` line in the unit's `ExecStart`. Leave `startCommand` out if you start the server yourself. All the LlamaStash presets need the CPU server from the [LlamaStash](#llamastash) section.
 
@@ -775,7 +776,7 @@ Optional, in `~/.pi/agent/extensions/pi-automode-classifier/config.json`. A conf
 | `rules` | all empty | Your own `deny`, `ask`, `classify` and `allow` patterns |
 | `allowedPaths` | `[]` | More directories where file changes are allowed, like the project directory |
 | `guardedPaths` | `[]` | More paths that count as the guard's own files, so changes to them always ask |
-| `credentialPaths` | `[]` | More files or directories that count as credential files, so a read of one always asks |
+| `credentialPaths` | `[]` | More files or directories that count as credential files, so a read of one always asks. Each entry is an absolute path or starts with `~/`; a directory entry covers everything under it |
 | `promptTimeoutMs` | `60000` | A confirm prompt nobody answers is treated as a `Block` after this long, so an unattended session doesn't wait there forever. `0` waits forever | Pi only: Hermes' approval gate has its own timeout |
 | `withoutUi.onAsk` | `"block"` | What to do with a call that needs a prompt when there is no UI: `block` or `allow`. Root, credential reads, downloaded code and this extension's own files are blocked either way, unless one of your rules matches |
 | `withoutUi.rules` | empty `allow` and `deny` | Patterns added to `rules` when there is no UI. A `deny` here wins over an `allow` in `rules` |

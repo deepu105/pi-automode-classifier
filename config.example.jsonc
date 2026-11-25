@@ -22,7 +22,8 @@
   // More files or directories that count as this extension's own: changes to them always ask.
   "guardedPaths": [],
   // More files or directories that count as credential files, so a read of one always asks, for
-  // example "~/work/vaults" or "~/.config/mytool/token".
+  // example "~/work/vaults" or "~/.config/mytool/token". Each entry is an absolute path or starts
+  // with "~/", and a directory entry covers everything under it.
   "credentialPaths": [],
 
   // A confirm prompt nobody answers is treated as a Block after this long, so an unattended

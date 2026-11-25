@@ -137,6 +137,9 @@ export const DEFAULTS: Config = {
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 export const isStrings = (v: unknown) => Array.isArray(v) && v.every((x) => typeof x === "string");
 export const isBool = (v: unknown) => typeof v === "boolean";
+// A credentialPaths entry names one place, so it is an absolute path or starts with `~/`. A
+// relative path would mean a different file in every project, and `~user/` another person's home.
+const isCredentialPaths = (v: unknown) => isStrings(v) && (v as string[]).every((p) => p.startsWith("/") || p.startsWith("~/"));
 const isString = (v: unknown) => typeof v === "string";
 const isThreshold = (v: unknown) => typeof v === "number" && v >= 0 && v <= 1;
 const atLeast = (min: number) => (v: unknown) => typeof v === "number" && v >= min;
@@ -167,7 +170,7 @@ const SCHEMA: Schema = {
   rules: { deny: isStrings, ask: isStrings, classify: isStrings, allow: isStrings },
   allowedPaths: isStrings,
   guardedPaths: isStrings,
-  credentialPaths: isStrings,
+  credentialPaths: isCredentialPaths,
   promptTimeoutMs: isTimeoutOrOff,
   withoutUi: { onAsk: oneOf("block", "allow"), rules: { allow: isStrings, deny: isStrings } },
   decider: (v) => isStrings(v) && (v as string[]).every((d) => ["llm", "classifier", "command"].includes(d)) && new Set(v as string[]).size === (v as string[]).length,
