@@ -82,10 +82,14 @@ async function askOnce(
   resolved: Resolved,
   system: string,
   message: string,
-  opts: { maxTokens: number; thinking: boolean; signal?: AbortSignal },
+  opts: { maxTokens: number; thinking: boolean; signal?: AbortSignal; sessionId?: string },
 ): Promise<{ text?: string; cut?: boolean; error?: string; tokens?: number }> {
   const options: Record<string, unknown> = { maxTokens: opts.maxTokens, temperature: 0 };
   if (opts.thinking && thinks(resolved)) options.reasoning = resolved.llm.thinkingLevel;
+  // A provider that routes by conversation, such as opencode's gateway, refuses a call that does
+  // not carry the session id every other request of the session carries. The host's own requests
+  // get it from the agent; a call made here has to ask for it.
+  if (opts.sessionId) options.sessionId = opts.sessionId;
   const timeout = AbortSignal.timeout(resolved.llm.timeoutMs);
   const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
   let stream: ReturnType<ChatRegistry["streamSimple"]>;
@@ -124,6 +128,8 @@ export async function decideWithLlm(
   signal?: AbortSignal,
   registry?: ChatRegistry,
   sessionModel?: Record<string, unknown>,
+  // The session the call belongs to, for a provider that routes per conversation. See askOnce.
+  sessionId?: string,
 ): Promise<LlmDecision> {
   const started = performance.now();
   const ms = () => Math.round(performance.now() - started);
@@ -143,7 +149,7 @@ export async function decideWithLlm(
   if (actionChars > budget) return { error: `the action is ${actionChars} chars and the model window has room for ${budget}`, lasting: true, ms: ms() };
   const transcript = buildTranscript(items, { ...llm.transcript, maxChars: Math.min(llm.transcript.maxChars, budget - actionChars) });
   const send = (instruction: string, opts: { maxTokens: number; thinking: boolean }) =>
-    askOnce(registry, resolved, system, `${transcript}\n\n${instruction}`, { ...opts, signal });
+    askOnce(registry, resolved, system, `${transcript}\n\n${instruction}`, { ...opts, signal, sessionId });
 
   let stage = llm.twoStage ? "fast" : "reasoning";
   let tokens = 0;
